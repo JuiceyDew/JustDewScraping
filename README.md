@@ -40,7 +40,7 @@ topic → plan (LLM) → collect → SQLite+FTS → cluster → label (LLM) → 
 
 | Upstream tool | Where it's used |
 |---|---|
-| Reddit API | `collectors/reddit_api.py` — 100 queries/min, used when credentials exist |
+| Reddit API | `collectors/reddit_api.py` — 100 queries/min; credentials need Reddit's approval, see Setup |
 | `arctic_shift` | `collectors/reddit_arctic.py` — free Reddit archive, the fallback |
 | DDG dorking | `collectors/dork.py` — `site:reddit.com` snippets, never touches Reddit |
 | HN (Algolia) | `collectors/hackernews.py` — free, no key, technical skew |
@@ -73,6 +73,27 @@ uv run python scripts/preflight.py
 `preflight.py` probes every external dependency and prints a pass/fail line per
 endpoint. **Run it first** — it answers questions that change how the pipeline
 behaves, in particular whether your Ollama Cloud key authorises embeddings.
+
+### Reddit access
+
+Reddit's own API is 50× faster than Arctic Shift and does not time out, and the
+collector for it is written and tested. But **credentials are no longer
+self-service**: Reddit's [Responsible Builder Policy](https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy)
+(November 2025) closed instant signup, and every request now goes to a manual
+review queue with no published timeline and no appeal. The policy also prohibits
+commercial resale or licensing of Reddit data — which covers selling a report
+built on Reddit quotes.
+
+So the pipeline does not assume you have it. Without credentials, `--sources
+reddit` uses Arctic Shift exactly as before, and three sources need no permission
+from anyone:
+
+| source | what it gets |
+|---|---|
+| `dork` | Reddit threads via `site:reddit.com` search snippets — never contacts Reddit |
+| `hackernews` | free, no key, officially provided via Algolia; technical skew |
+| `lemmy` | federated and free; in practice only worth it for tech topics |
+| `stackexchange` | free, 300 requests/day; the planner picks the sites, most topics get none |
 
 ### Embeddings
 
