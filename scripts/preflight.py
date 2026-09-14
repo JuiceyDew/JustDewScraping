@@ -40,8 +40,14 @@ def probe_arctic() -> None:
                 report("arctic: subreddits/search", False, repr(e)[:70])
 
             try:
+                # limit=25, not 2. When the backend answers a keyword query with
+                # "Timeout. Maybe slow down a bit", the client recovers by halving
+                # the page -- but it gives up immediately once limit <= 10 (there
+                # is nothing left to halve). Probing with a tiny limit therefore
+                # turns a routine transient into a BLOCKING failure on a service
+                # that is actually healthy. 25 leaves the ladder room to work.
                 rows = await cl.get("/api/posts/search",
-                                    {"subreddit": "coldplunge", "query": "chiller", "limit": 2})
+                                    {"subreddit": "coldplunge", "query": "chiller", "limit": 25})
                 report("arctic: posts/search", bool(rows), f"{len(rows)} post(s)")
             except Exception as e:  # noqa: BLE001
                 report("arctic: posts/search", False, repr(e)[:70])
@@ -123,13 +129,41 @@ def probe_ollama() -> None:
             warn=not ok,
         )
         if not ok:
-            print("           -> expected: this stack is cloud-only and clusters "
-                  "with TF-IDF.")
-            print("           -> `report --engine gpt-researcher` and `ask` are "
-                  "unavailable; all")
-            print("              other commands are unaffected. See the README.")
+            print("           -> expected: Ollama Cloud serves chat, not embeddings.")
+            print("           -> set EMBED_BASE_URL/EMBED_API_KEY to a provider that "
+                  "does (see below).")
     except Exception as e:
         report("ollama: /v1/embeddings (CLOUD)", False, repr(e)[:70], warn=True)
+
+
+def probe_provider() -> None:
+    """Probe the configured embeddings provider, if there is one.
+
+    This is the probe that decides whether clustering gets a real embedder and
+    whether `report --engine gpt-researcher` and `ask` can run at all.
+    """
+    base = settings.embed_base_url
+    if not base:
+        report("embeddings provider configured", False,
+               "EMBED_BASE_URL not set -- will use in-process TF-IDF", warn=True)
+        print("           -> set EMBED_BASE_URL/EMBED_API_KEY to any OpenAI-compatible")
+        print("              embeddings endpoint (Jina, Voyage, OpenAI, Cohere). See .env.example.")
+        return
+    try:
+        h = {"Authorization": f"Bearer {settings.embed_api_key}"} if settings.embed_api_key else {}
+        r = httpx.post(
+            f"{base.rstrip('/')}/embeddings",
+            headers=h,
+            json={"model": settings.embed_model, "input": "hello world"},
+            timeout=60,
+        )
+        ok = r.status_code == 200
+        dim = len(r.json()["data"][0]["embedding"]) if ok else 0
+        report(f"embeddings provider: {base}", ok,
+               f"dim={dim} ({settings.embed_model})" if ok
+               else f"HTTP {r.status_code}: {r.text[:80]}")
+    except Exception as e:  # noqa: BLE001
+        report(f"embeddings provider: {base}", False, repr(e)[:70])
 
 
 def probe_embedder() -> None:
@@ -150,6 +184,7 @@ if __name__ == "__main__":
     print("\n=== Ollama Cloud ===")
     probe_ollama()
     print("\n=== Embeddings ===")
+    probe_provider()
     probe_embedder()
 
     hard = ["arctic: subreddits/search", "arctic: posts/search"]

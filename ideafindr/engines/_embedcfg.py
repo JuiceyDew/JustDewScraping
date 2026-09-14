@@ -11,8 +11,7 @@ confusing 401 from deep inside a vector store.
 
 from __future__ import annotations
 
-from ideafindr.config import settings
-from ideafindr.embed import OllamaEmbedder, get_embedder
+from ideafindr.embed import OpenAICompatEmbedder, get_embedder
 
 
 class EmbeddingsUnavailable(RuntimeError):
@@ -28,21 +27,23 @@ def resolve() -> tuple[str, str]:
     Raises EmbeddingsUnavailable when only the TF-IDF fallback is present.
     """
     emb = get_embedder()
-    if not isinstance(emb, OllamaEmbedder):
+    if not isinstance(emb, OpenAICompatEmbedder):
         raise EmbeddingsUnavailable(
-            "This command needs an embeddings API, and the stack is configured "
-            "cloud-only with no embeddings provider.\n\n"
-            "Ollama Cloud does not serve embeddings: /v1/embeddings returns 404 "
-            "and /api/embed returns 401 for cloud keys. gpt-researcher and "
-            "deep-searcher each build their own vector store and cannot use the "
-            "in-process TF-IDF embedder.\n\n"
+            "This command needs an embeddings API and no provider is configured.\n\n"
+            "gpt-researcher and deep-searcher each build their own vector store, "
+            "so they need a reachable embeddings endpoint and cannot use the "
+            "in-process TF-IDF embedder. Ollama Cloud does not serve one: "
+            "/v1/embeddings returns 404 and /api/embed returns 401 for cloud keys.\n\n"
             "Everything else works without this -- plan, collect, analyze, report "
             "and runs are unaffected.\n\n"
-            "To enable these two commands, add an embeddings provider that has an "
-            "API (Jina, Voyage, OpenAI, Cohere all work) and point EMBED_BACKEND "
-            "at it. See the Embeddings section of the README."
+            "To enable these two commands, set EMBED_BASE_URL and EMBED_API_KEY to "
+            "any OpenAI-compatible embeddings provider (Jina, Voyage, OpenAI and "
+            "Cohere all work) and leave EMBED_BACKEND at `auto` or set it to `api`. "
+            "See the Embeddings section of the README."
         )
-    return emb.base_url, (settings.ollama_api_key if emb.name == "ollama-cloud" else "ollama")
+    # The credential travels on the embedder itself. Ollama's OpenAI shim ignores
+    # the value but some clients refuse to send an empty one, hence the fallback.
+    return emb.base_url, (emb.api_key or "ollama")
 
 
 def resolve_root() -> str:

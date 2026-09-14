@@ -1,17 +1,26 @@
 """Embedding backends, chosen at runtime.
 
-This machine is Chimera Linux (musl libc). `onnxruntime` and PyTorch publish
-glibc-only wheels, so fastembed / sentence-transformers are NOT installable --
-hence a backend chain rather than one hard dependency:
+Embeddings are remote or in-process, never a local model: this deployment runs
+on low-end hardware, so nothing may run inference on this box. The chain `auto`
+tries, in order:
 
-    ollama-cloud  -> if the cloud key authorizes /v1/embeddings
-    ollama-local  -> if a local ollama daemon is running
-    tfidf         -> pure scikit-learn, always works, no API, no network
+    api           -> any OpenAI-compatible /v1/embeddings provider (Jina, Voyage,
+                     OpenAI, Cohere, Together). Set EMBED_BASE_URL + EMBED_API_KEY.
+    ollama-cloud  -> Ollama Cloud, if it ever starts serving embeddings. Verified
+                     2026-09: /v1/embeddings returns 404 and /api/embed returns
+                     401 for cloud keys, so this probe fails and `auto` moves on.
+    tfidf         -> pure scikit-learn, in-process, no API, no network.
+
+`ollama-local` exists too but is deliberately NOT in the `auto` chain -- if a
+daemon ever appears on this machine for unrelated reasons, `auto` must not start
+silently routing embedding work onto the CPU. Ask for it by name
+(EMBED_BACKEND=ollama-local) on hardware that can afford it.
 
 TF-IDF+SVD is a real fallback, not a stub: for short social posts that share
 vocabulary it clusters decently. It is weaker at grouping posts that mean the
 same thing in different words, which is exactly what the LLM labelling step
-partially compensates for.
+partially compensates for. It is weaker still on short search queries, which
+share almost no vocabulary at all -- so the demand layer wants a real embedder.
 """
 
 from __future__ import annotations
@@ -57,13 +66,23 @@ def _l2(m: np.ndarray) -> np.ndarray:
     return (m / np.maximum(n, 1e-12)).astype(np.float32)
 
 
-class OllamaEmbedder(Embedder):
-    """OpenAI-compatible /v1/embeddings, cloud or local."""
+class OpenAICompatEmbedder(Embedder):
+    """Any OpenAI-compatible /v1/embeddings endpoint.
 
-    def __init__(self, base_url: str, model: str, api_key: str = "", name: str = "ollama"):
+    The protocol is identical across hosted providers (Jina, Voyage, OpenAI,
+    Cohere, Together) and an Ollama daemon's OpenAI shim: POST {base}/embeddings
+    with {"model", "input"} and a Bearer token, then read data[].embedding back in
+    index order. One class covers all of them, so switching provider is a config
+    change rather than a code change.
+    """
+
+    def __init__(self, base_url: str, model: str, api_key: str = "", name: str = "api"):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.name = name
+        # Kept on the instance so callers (engines/_embedcfg.py) can hand the
+        # credential to a third-party library without re-deriving it from `name`.
+        self.api_key = api_key
         self._h = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
     def encode(self, texts: list[str], batch: int = 32) -> np.ndarray:
@@ -85,7 +104,7 @@ class OllamaEmbedder(Embedder):
 
 
 class TfidfEmbedder(Embedder):
-    """TF-IDF -> TruncatedSVD (LSA). Pure sklearn: works on musl, offline, free."""
+    """TF-IDF -> TruncatedSVD (LSA). Pure sklearn: in-process, offline, free."""
 
     name = "tfidf"
 
@@ -135,31 +154,59 @@ def _probe(base: str, model: str, key: str = "") -> bool:
 
 
 def get_embedder(backend: str | None = None) -> Embedder:
-    """Resolve the backend. `auto` probes cloud, then local, then falls back."""
+    """Resolve the backend. `auto` probes api -> ollama-cloud -> tfidf.
+
+    `ollama-local` is reachable only by naming it explicitly; see the module
+    docstring for why it is kept out of `auto`.
+    """
     b = (backend or settings.embed_backend).lower()
+
+    if b in ("api", "auto"):
+        if not settings.embed_base_url:
+            if b == "api":
+                raise RuntimeError(
+                    "EMBED_BACKEND=api but EMBED_BASE_URL is empty. Point it at an "
+                    "OpenAI-compatible embeddings endpoint (Jina, Voyage, OpenAI, "
+                    "Cohere and Together all work) and set EMBED_API_KEY. "
+                    "See .env.example."
+                )
+        elif _probe(settings.embed_base_url, settings.embed_model, settings.embed_api_key):
+            log.info("embeddings: api (%s @ %s)", settings.embed_model, settings.embed_base_url)
+            return OpenAICompatEmbedder(
+                settings.embed_base_url, settings.embed_model,
+                settings.embed_api_key, "api",
+            )
+        elif b == "api":
+            raise RuntimeError(
+                f"EMBED_BACKEND=api but {settings.embed_base_url}/embeddings did not "
+                f"return usable embeddings for model {settings.embed_model!r}. "
+                "Check EMBED_BASE_URL, EMBED_API_KEY and EMBED_MODEL, then run: "
+                "uv run ideafindr doctor"
+            )
+        else:
+            log.info("embeddings: configured api endpoint did not answer, trying ollama cloud")
 
     if b in ("ollama-cloud", "auto") and settings.ollama_api_key:
         if _probe(settings.ollama_base_url, settings.embed_model, settings.ollama_api_key):
             log.info("embeddings: ollama cloud (%s)", settings.embed_model)
-            return OllamaEmbedder(
+            return OpenAICompatEmbedder(
                 settings.ollama_base_url, settings.embed_model,
                 settings.ollama_api_key, "ollama-cloud",
             )
         if b == "ollama-cloud":
             raise RuntimeError(
                 "EMBED_BACKEND=ollama-cloud but /v1/embeddings rejected the key. "
-                "Run: uv run python scripts/preflight.py"
+                "Ollama Cloud does not serve embeddings; use EMBED_BACKEND=api with "
+                "a provider that does. Run: uv run ideafindr doctor"
             )
-        log.info("embeddings: ollama cloud rejected /v1/embeddings, trying local")
+        log.info("embeddings: ollama cloud serves no embeddings, falling back to TF-IDF")
 
-    if b in ("ollama-local", "auto"):
+    if b == "ollama-local":
         local = f"{settings.ollama_local_url.rstrip('/')}/v1"
         if _probe(local, settings.embed_model):
             log.info("embeddings: local ollama (%s)", settings.embed_model)
-            return OllamaEmbedder(local, settings.embed_model, "", "ollama-local")
-        if b == "ollama-local":
-            raise RuntimeError(f"No local ollama at {settings.ollama_local_url}")
-        log.info("embeddings: no local ollama, falling back to TF-IDF")
+            return OpenAICompatEmbedder(local, settings.embed_model, "", "ollama-local")
+        raise RuntimeError(f"No local ollama at {settings.ollama_local_url}")
 
-    log.info("embeddings: TF-IDF + SVD (musl-safe, offline)")
+    log.info("embeddings: TF-IDF + SVD (in-process, offline)")
     return TfidfEmbedder()

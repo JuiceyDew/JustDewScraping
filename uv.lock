@@ -666,20 +666,19 @@ wheels = [
 
 [[package]]
 name = "firecrawl-py"
-version = "4.42.0"
+version = "2.16.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
-    { name = "httpx" },
     { name = "nest-asyncio" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/68/a1/b9c330494d6cb755ebc6f3360d8231e7579789898619799845000b0caff8/firecrawl_py-4.42.0.tar.gz", hash = "sha256:48f0210243ae2d8da57647b54d7a372f5fdd5c4c8bf15c67597c92a729788f78", size = 237434, upload-time = "2026-09-08T14:41:30.733Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/97/7a/e6911fe11d140db5b5deda7a3ad6ee80c7615fcb248097ec7a4bc784eff6/firecrawl_py-2.16.5.tar.gz", hash = "sha256:7f5186bba359a426140a6827b550a604e62bfbeda33ded757952899b1cca4c83", size = 40154, upload-time = "2025-08-06T20:38:23.92Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/45/8e/1799ded3652b4245466250558b0b22759dc2fdc538bb84f07d03e8185b96/firecrawl_py-4.42.0-py3-none-any.whl", hash = "sha256:ccce7a0f33be9433790b23227afdec2b225e10efbaf1467d496476aff74dfacb", size = 291776, upload-time = "2026-09-08T14:41:29.393Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/99/fa2a41e2c1c5ff3e01150470b0a8a630792a363724c188bf6522e6798be7/firecrawl_py-2.16.5-py3-none-any.whl", hash = "sha256:3caed19b8f21522ab9c2193c2226990f2468e6bc5669ef54aa156e4230a5e35e", size = 75978, upload-time = "2025-08-06T20:38:22.857Z" },
 ]
 
 [[package]]
@@ -742,7 +741,7 @@ wheels = [
 
 [[package]]
 name = "gpt-researcher"
-version = "0.16.0"
+version = "0.15.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -886,9 +885,9 @@ dependencies = [
     { name = "zopfli" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7d/26/1fa27951b0b812901cb6cf68fb2341aa2f892df0192e06a75dc4be7c5e3a/gpt_researcher-0.16.0.tar.gz", hash = "sha256:5892dcd1f6e03b5f6c26eb24f33e5959c599cd06027eceed692e00d2e147035c", size = 277767, upload-time = "2026-07-18T08:04:08.44Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/38/60/83dfea3f3b134c98e0d8dc8a3f193b94519ba8723a85265b15db98661c46/gpt_researcher-0.15.1.tar.gz", hash = "sha256:ca405d398c994374697253eccfa6214c636dee84a4f0e0e5b2b2114c832fc86c", size = 203711, upload-time = "2026-05-28T07:16:45.349Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/eb/14f41d725affadf9c00f05cbb5399cc5ac614697b9c8b4a68eb6f346c4f6/gpt_researcher-0.16.0-py3-none-any.whl", hash = "sha256:392432eea1757fa16462604e6579e425d57aa83f7d1ecc622a5807ada94fc043", size = 356984, upload-time = "2026-07-18T08:04:06.382Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/ae/2dc5cf8180f06f4813d63a52564314871cf6c46290e78c16916f1c58dccb/gpt_researcher-0.15.1-py3-none-any.whl", hash = "sha256:d75cee841f3d0f524e7da23ba091bd013492711d859f5dc2023207ccaec7a482", size = 251282, upload-time = "2026-05-28T07:16:43.256Z" },
 ]
 
 [[package]]
@@ -1136,6 +1135,7 @@ dev = [
 ]
 engines = [
     { name = "deepsearcher" },
+    { name = "firecrawl-py" },
     { name = "gpt-researcher" },
 ]
 scrapers = [
@@ -1148,7 +1148,8 @@ requires-dist = [
     { name = "ddgs", specifier = ">=9.0" },
     { name = "deepsearcher", marker = "extra == 'engines'", specifier = ">=0.0.2" },
     { name = "fastapi", specifier = ">=0.115" },
-    { name = "gpt-researcher", marker = "extra == 'engines'", specifier = ">=0.12" },
+    { name = "firecrawl-py", marker = "extra == 'engines'", specifier = "<3" },
+    { name = "gpt-researcher", marker = "extra == 'engines'", specifier = ">=0.15.1,<0.16" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "instaloader", marker = "extra == 'scrapers'", specifier = ">=4.14" },
     { name = "jinja2", specifier = ">=3.1" },

@@ -37,14 +37,20 @@ class Settings(BaseSettings):
     smart_model: str = "gpt-oss:120b"
 
     # --- embeddings -----------------------------------------------------------
-    # Cloud-only deployment: chat goes to Ollama Cloud, and clustering uses the
-    # in-process TF-IDF embedder. There is no embeddings API in the stack because
-    # Ollama Cloud does not serve one -- /v1/embeddings returns 404 and /api/embed
-    # returns 401 for cloud keys. "auto" still probes cloud -> local -> tfidf and
-    # would pick up a cloud embeddings endpoint automatically if one appeared.
+    # Embeddings are remote or in-process, never local: this box is low-end, so
+    # no model runs here. Ollama Cloud serves chat but no embeddings
+    # (/v1/embeddings 404s, /api/embed 401s for cloud keys, verified 2026-09), so
+    # a real embedder means a hosted provider -- set embed_base_url and
+    # embed_api_key to any OpenAI-compatible endpoint (Jina, Voyage, OpenAI,
+    # Cohere, Together). Without one, clustering falls back to in-process TF-IDF,
+    # which is fine for social posts and weak for short search queries.
+    # "auto" probes api -> ollama-cloud -> tfidf. See ideafindr/embed.py.
     embed_backend: str = "tfidf"
-    # Only consulted when embed_backend points at an actual embeddings API.
     embed_model: str = "all-minilm"
+    # OpenAI-compatible embeddings endpoint, including the /v1 suffix.
+    embed_base_url: str = ""
+    embed_api_key: str = ""
+    # Only used when embed_backend is explicitly "ollama-local"; never by "auto".
     ollama_local_url: str = "http://localhost:11434"
 
     # --- sources --------------------------------------------------------------
