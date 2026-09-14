@@ -161,26 +161,20 @@ ideafindr
 
 Three screens, each doing one thing.
 
-**Home** is a prompt and your past projects, and nothing else:
+**Home** is one list — start something new, or open something old:
 
 ```
                           IDEAFINDR
              what people say · what people search
 
-   ┌────────────────────────────────────────────────────┐
-   │ Research a topic…                                  │
-   └────────────────────────────────────────────────────┘
-    enter to research · ↑↓ then enter to open · x to delete
-
-   Projects
+    +  New research…
     cold plunge tubs    716 docs · 19 themes · 12 intents · Sep 13
-    cold plunge tubs    673 docs · 18 themes · Sep 12
+    sauna tents         412 docs · 14 themes · Sep 11
 ```
 
-`↓` from the prompt moves into the project list, `esc` goes back. `x` (or
-`delete`) removes the highlighted project after confirming — its documents,
-themes, search demand and rendered reports. There is a `ideafindr delete <run>`
-subcommand for the same thing.
+Everything is a row, so the arrow keys always move and enter always activates —
+there is no focus to lose. `n` also opens the prompt, `x` deletes the highlighted
+project after confirming.
 
 Typing a topic runs the whole pipeline — plan, collect, cluster, harvest search
 demand, write the report — on a **Research** screen that shows each stage as it
@@ -206,7 +200,8 @@ search over that corpus, with `esc` to go back:
 
 | key | on a project page |
 |---|---|
-| `s` | search this project's corpus |
+| `1` `2` `3` | switch to Themes / Demand / Search |
+| `tab` | cycle panes |
 | `a` | re-cluster into themes |
 | `d` | harvest search demand |
 | `r` | write the report |

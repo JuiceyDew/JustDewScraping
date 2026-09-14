@@ -149,6 +149,42 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(False)
 
 
+class TopicScreen(ModalScreen[str]):
+    """Ask for a topic. One job, one widget, and the only place an Input exists.
+
+    Home used to carry this inline, which created two focus zones on one screen:
+    the prompt held focus, plain keys went into it rather than triggering
+    bindings, and reaching the project list needed an arrow-key binding invented
+    for the purpose. Moving it here means Home's list always has focus.
+    """
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    CSS = """
+    TopicScreen { align: center middle; }
+    #box { width: 64; height: auto; padding: 1 2; border: round $foreground 50%;
+           background: $surface; }
+    #ask { text-style: bold; margin-bottom: 1; }
+    #keys { color: $foreground 45%; margin-top: 1; }
+    """
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Static("What do you want to research?", id="ask")
+            yield Input(placeholder="e.g. cold plunge tubs", id="topic")
+            yield Static("enter = start    ·    esc = cancel", id="keys")
+
+    def on_mount(self) -> None:
+        self.query_one("#topic", Input).focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss("")
+
+    @on(Input.Submitted, "#topic")
+    def submit(self, event: Input.Submitted) -> None:
+        self.dismiss(event.value.strip())
+
+
 def delete_project(run_id: str) -> str:
     """Remove a project from the database and drop its rendered reports.
 
@@ -171,15 +207,16 @@ def delete_project(run_id: str) -> str:
 
 
 class HomeScreen(Screen):
-    """A prompt and your past projects. Deliberately almost empty."""
+    """One list: start something new, or open something old.
+
+    Everything is a row, so the arrow keys always move and enter always
+    activates. There is no focus to lose and no mode to be in.
+    """
+
+    NEW = "+  New research…"
 
     BINDINGS = [
-        # `down` from the topic box moves into the project list, which is what the
-        # hint promises. Without it the arrow keys just move the text cursor and
-        # the project list is unreachable -- as are every single-letter binding
-        # below, because an focused Input swallows plain keys.
-        ("down", "to_projects", "Projects"),
-        ("escape", "to_topic", "Back to topic"),
+        ("n", "new", "New"),
         ("delete", "delete_project", "Delete"),
         ("x", "delete_project", "Delete"),
         ("f5", "refresh", "Refresh"),
@@ -189,20 +226,13 @@ class HomeScreen(Screen):
 
     CSS = """
     HomeScreen { align: center top; }
-    #hero { width: 72; margin-top: 2; }
+    #hero { width: 74; margin-top: 3; }
     #wordmark { text-style: bold; width: 100%; content-align: center middle; }
     #tagline { color: $foreground 55%; width: 100%; content-align: center middle;
                margin-bottom: 2; }
-    #topic { width: 100%; }
-    #hint { color: $foreground 45%; width: 100%; content-align: center middle;
-            margin-bottom: 2; }
-    #projects-label { text-style: bold; margin-bottom: 1; }
-    #projects { height: auto; max-height: 14; background: transparent; }
-    /* Without explicit heights the inner Horizontal takes 1fr and each row
-       becomes as tall as the list, hiding every project but the first. */
-    #projects ListItem { height: 1; padding: 0 1; background: transparent; }
-    #projects ListItem Static { height: 1; }
-    #empty { color: $foreground 45%; }
+    #rows { height: auto; max-height: 18; background: transparent; }
+    #rows ListItem { height: 1; padding: 0 1; background: transparent; }
+    #rows ListItem Static { height: 1; }
     """
 
     def compose(self) -> ComposeResult:
@@ -210,65 +240,46 @@ class HomeScreen(Screen):
             with Vertical(id="hero"):
                 yield Static("IDEAFINDR", id="wordmark")
                 yield Static("what people say · what people search", id="tagline")
-                yield Input(placeholder="Research a topic…", id="topic")
-                yield Static(
-                    "enter to research  ·  ↑↓ then enter to open  ·  x to delete",
-                    id="hint",
-                )
-                yield Label("Projects", id="projects-label")
-                yield ListView(id="projects")
+                yield ListView(id="rows")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.query_one("#topic", Input).focus()
         self.action_refresh()
+        self.query_one("#rows", ListView).focus()
 
     def action_refresh(self) -> None:
-        listing = self.query_one("#projects", ListView)
-        listing.clear()
+        rows = self.query_one("#rows", ListView)
+        rows.clear()
         self.run_ids: list[str] = []
-        rows = _project_rows()
-        if not rows:
-            listing.append(ListItem(Static("No projects yet — type a topic above.",
-                                           id="empty")))
-            return
-        for rid, topic, meta in rows:
+        rows.append(ListItem(Static(f"[b]{self.NEW}[/b]")))
+        for rid, topic, meta in _project_rows():
             self.run_ids.append(rid)
-            # One Static per row, not a Horizontal of two: side-by-side widgets
-            # each defaulted to the full width, so the first pushed the second
-            # off the row entirely. Markup gives the same two-tone look with one
-            # widget and no layout arithmetic.
-            listing.append(
-                ListItem(Static(f"[b]{topic[:28]:<28}[/b] [dim]{meta}[/dim]"))
-            )
+            rows.append(ListItem(Static(f"[b]{topic[:28]:<28}[/b] [dim]{meta}[/dim]")))
+        rows.index = 0
+        rows.focus()
 
-    def action_to_projects(self) -> None:
-        """Move focus from the topic box into the project list."""
-        listing = self.query_one("#projects", ListView)
-        if not self.run_ids:
-            return
-        if self.query_one("#topic", Input).has_focus:
-            listing.focus()
-            if listing.index is None:
-                listing.index = 0
-        else:
-            listing.action_cursor_down()
+    def _selected_run(self) -> str | None:
+        """The run under the cursor, or None when that is the New row."""
+        idx = self.query_one("#rows", ListView).index
+        if idx is None or idx == 0:
+            return None
+        i = idx - 1  # row 0 is "New research"
+        return self.run_ids[i] if 0 <= i < len(self.run_ids) else None
 
-    def action_to_topic(self) -> None:
-        """Escape goes back to the topic box, clearing it if already there."""
-        topic = self.query_one("#topic", Input)
-        if topic.has_focus:
-            topic.value = ""
-        else:
-            topic.focus()
+    def action_new(self) -> None:
+        def go(topic: str | None) -> None:
+            if topic:
+                self.app.push_screen(ResearchScreen(topic))
+
+        self.app.push_screen(TopicScreen(), go)
+
+    def action_cycle_theme(self) -> None:
+        self.app.action_cycle_theme()
 
     def action_delete_project(self) -> None:
-        """Delete the highlighted project, after confirming."""
-        listing = self.query_one("#projects", ListView)
-        idx = listing.index
-        if idx is None or not (0 <= idx < len(getattr(self, "run_ids", []))):
+        run_id = self._selected_run()
+        if not run_id:
             return
-        run_id = self.run_ids[idx]
         con = db.connect()
         try:
             run = db.get_run(con, run_id)
@@ -292,32 +303,13 @@ class HomeScreen(Screen):
             done,
         )
 
-    def action_cycle_theme(self) -> None:
-        self.app.action_cycle_theme()
-
-    @on(Input.Submitted, "#topic")
-    def start(self, event: Input.Submitted) -> None:
-        topic = event.value.strip()
-        if not topic:
-            return
-        self.query_one("#topic", Input).value = ""
-        # A slash command is someone reaching for a way out, not a topic. Without
-        # this, typing "/exit" scraped the web for the phrase "/exit" and left a
-        # zero-document project behind.
-        if topic.startswith("/"):
-            if topic.lower() in ("/exit", "/quit", "/q"):
-                self.app.exit()
-            else:
-                self.notify(f"Unknown command {topic}. Type a topic, or q to quit.",
-                            severity="warning")
-            return
-        self.app.push_screen(ResearchScreen(topic))
-
-    @on(ListView.Selected, "#projects")
-    def open_project(self, event: ListView.Selected) -> None:
-        idx = event.list_view.index
-        if idx is not None and 0 <= idx < len(getattr(self, "run_ids", [])):
-            self.app.push_screen(ProjectScreen(self.run_ids[idx]))
+    @on(ListView.Selected, "#rows")
+    def activate(self, event: ListView.Selected) -> None:
+        run_id = self._selected_run()
+        if run_id is None:
+            self.action_new()
+        else:
+            self.app.push_screen(ProjectScreen(run_id))
 
 
 # --- research -----------------------------------------------------------------
@@ -467,9 +459,14 @@ class ProjectScreen(Screen):
 
     BINDINGS = [
         ("escape", "back", "Back"),
-        ("s", "focus_search", "Search"),
+        # TabbedContent ships with no keys, so the tabs were mouse-only. The
+        # numbers match the order they appear in.
+        ("1", "tab('tab-themes')", "Themes"),
+        ("2", "tab('tab-demand')", "Demand"),
+        ("3", "tab('tab-search')", "Search"),
+        ("tab", "next_tab", "Next tab"),
         ("a", "analyze", "Re-analyze"),
-        ("d", "demand", "Demand"),
+        ("d", "demand", "Harvest demand"),
         ("r", "report", "Report"),
         ("ctrl+t", "cycle_theme", "Theme"),
     ]
@@ -493,11 +490,11 @@ class ProjectScreen(Screen):
         yield Static("", id="proj-head")
         yield Static("", id="proj-sub")
         with TabbedContent(id="tabs"):
-            with TabPane("Themes", id="tab-themes"):
+            with TabPane("1 Themes", id="tab-themes"):
                 yield DataTable(id="themes", cursor_type="row")
-            with TabPane("Demand", id="tab-demand"):
+            with TabPane("2 Demand", id="tab-demand"):
                 yield DataTable(id="demand", cursor_type="row")
-            with TabPane("Search", id="tab-search"):
+            with TabPane("3 Search", id="tab-search"):
                 yield Input(placeholder="Search this corpus…", id="search")
                 yield DataTable(id="results", cursor_type="row")
         yield Static("", id="proj-status")
@@ -575,9 +572,35 @@ class ProjectScreen(Screen):
     def action_cycle_theme(self) -> None:
         self.app.action_cycle_theme()
 
-    def action_focus_search(self) -> None:
-        self.query_one("#tabs", TabbedContent).active = "tab-search"
-        self.query_one("#search", Input).focus()
+    TABS = ("tab-themes", "tab-demand", "tab-search")
+
+    # Which widget should hold focus in each pane. Focus has to move with the
+    # tab, not just follow it: Textual keeps the active tab in step with whatever
+    # is focused, so leaving focus in the search Input pinned the pane and made
+    # tab-cycling stick there. Focusing the pane's own widget also means the
+    # arrow keys work on the table the moment you arrive.
+    TAB_FOCUS = {
+        "tab-themes": "#themes",
+        "tab-demand": "#demand",
+        "tab-search": "#search",
+    }
+
+    def action_tab(self, tab_id: str) -> None:
+        self.query_one("#tabs", TabbedContent).active = tab_id
+        target = self.TAB_FOCUS.get(tab_id)
+        if target:
+            try:
+                self.query_one(target).focus()
+            except Exception:  # noqa: BLE001 - pane not mounted yet
+                pass
+
+    def action_next_tab(self) -> None:
+        tabs = self.query_one("#tabs", TabbedContent)
+        try:
+            i = self.TABS.index(tabs.active)
+        except ValueError:
+            i = -1
+        self.action_tab(self.TABS[(i + 1) % len(self.TABS)])
 
     @on(Input.Submitted, "#search")
     def search(self, event: Input.Submitted) -> None:

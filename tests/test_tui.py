@@ -14,6 +14,7 @@ from ideafindr.models import RunPlan
 from ideafindr.store import db
 from ideafindr.tui.app import (
     ConfirmScreen,
+    TopicScreen,
     HomeScreen,
     IdeafindrApp,
     ProjectScreen,
@@ -43,21 +44,24 @@ def seeded(tmp_path, plan, monkeypatch):
 # --- home ---------------------------------------------------------------------
 
 
-async def test_home_opens_on_the_prompt_with_projects_listed(seeded):
-    """Home exists to answer one question, so the topic input takes focus."""
+async def test_home_is_one_list_with_new_research_first(seeded):
+    """Everything is a row, so the arrows always move and enter always activates.
+    The previous layout had an Input holding focus beside a list, which meant
+    plain keys went into the text box and the list needed a special binding to
+    reach at all."""
     app = IdeafindrApp()
     async with app.run_test() as pilot:
         await pilot.pause()
         home = app.screen
         assert isinstance(home, HomeScreen)
-        assert home.query_one("#topic").has_focus
-        assert home.query_one("#projects").children, "past projects should be listed"
-        assert set(home.run_ids) == {"run-a", "run-b"}
+        rows = home.query_one("#rows")
+        assert rows.has_focus, "the list, not a text box, holds focus"
+        assert len(rows.children) == 3, "one New row plus two projects"
+        assert rows.index == 0
+        assert not home.query("Input"), "Home must not own an input any more"
 
 
 async def test_home_stays_uncluttered(seeded):
-    """The previous layout put runs, themes, demand, search, compare and a log on
-    one screen. Home should carry the prompt and the project list, nothing more."""
     app = IdeafindrApp()
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -67,62 +71,57 @@ async def test_home_stays_uncluttered(seeded):
         assert not home.query("TabbedContent"), "no tabs on the home screen"
 
 
-async def test_typing_a_topic_starts_research(seeded):
+async def test_enter_on_the_first_row_asks_for_a_topic(seeded):
     app = IdeafindrApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        started: list[str] = []
-        # Stub the worker so no network or LLM call happens in a test.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, TopicScreen)
+        assert app.screen.query_one("#topic").has_focus
+
+
+async def test_topic_prompt_starts_research_and_escape_cancels(seeded):
+    app = IdeafindrApp()
+    started: list[str] = []
+    async with app.run_test() as pilot:
+        await pilot.pause()
         ResearchScreen.deep_research = lambda self: started.append(self.topic)  # type: ignore[assignment]
+
+        await pilot.press("n")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, HomeScreen), "esc returns home"
+        assert started == [], "cancelling must not start anything"
+
+        await pilot.press("n")
+        await pilot.pause()
         app.screen.query_one("#topic").value = "sauna tents"
         await pilot.press("enter")
         await pilot.pause()
-        assert isinstance(app.screen, ResearchScreen)
         assert started == ["sauna tents"]
+        assert isinstance(app.screen, ResearchScreen)
 
 
-async def test_arrow_down_reaches_the_project_list(seeded):
-    """The hint says "↑↓ then enter to open a project". A focused Input swallows
-    the arrows, so without an explicit binding the list is unreachable -- and so
-    is every single-letter key, including delete."""
+async def test_arrow_keys_move_through_the_list(seeded):
+    """No focus juggling: down from the New row lands on the first project."""
     app = IdeafindrApp()
     async with app.run_test() as pilot:
         await pilot.pause()
         home = app.screen
-        assert home.query_one("#topic").has_focus
+        assert home._selected_run() is None, "row 0 is New research, not a project"
         await pilot.press("down")
         await pilot.pause()
-        assert home.query_one("#projects").has_focus
-        await pilot.press("escape")
-        await pilot.pause()
-        assert home.query_one("#topic").has_focus, "escape returns to the prompt"
+        assert home._selected_run() == home.run_ids[0]
 
 
-async def test_slash_commands_are_not_treated_as_topics(seeded):
-    """Typing /exit to quit once started a web scrape for the phrase "/exit" and
-    left a zero-document project behind."""
-    app = IdeafindrApp()
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        started: list[str] = []
-        ResearchScreen.deep_research = lambda self: started.append(self.topic)  # type: ignore[assignment]
-
-        app.screen.query_one("#topic").value = "/nonsense"
-        await pilot.press("enter")
-        await pilot.pause()
-        assert started == [], "a slash command must never start a run"
-        assert isinstance(app.screen, HomeScreen), "and must not navigate away"
-
-
-async def test_every_project_row_is_visible(seeded):
-    """Each row's inner Horizontal defaulted to 1fr, so rows grew to the height of
-    the whole list and all but the first were pushed off-screen."""
+async def test_every_row_is_visible(seeded):
     app = IdeafindrApp()
     async with app.run_test(size=(110, 34)) as pilot:
         await pilot.pause()
         await pilot.pause()
-        items = app.screen.query_one("#projects").children
-        assert len(items) == 2
+        items = app.screen.query_one("#rows").children
         assert all(i.size.height == 1 for i in items), \
             f"rows should be one line each, got {[i.size.height for i in items]}"
 
@@ -132,9 +131,9 @@ async def test_selecting_a_project_opens_its_own_page(seeded):
     async with app.run_test() as pilot:
         await pilot.pause()
         home = app.screen
-        listing = home.query_one("#projects")
-        listing.index = home.run_ids.index("run-a")
-        listing.action_select_cursor()
+        rows = home.query_one("#rows")
+        rows.index = 1 + home.run_ids.index("run-a")
+        rows.action_select_cursor()
         await pilot.pause()
         assert isinstance(app.screen, ProjectScreen)
         assert app.screen.run_id == "run-a"
@@ -224,6 +223,41 @@ async def test_project_heading_stays_on_screen(seeded):
         assert screen.query_one("#proj-sub").region.y >= 0
 
 
+async def test_number_keys_switch_project_tabs(seeded):
+    """TabbedContent ships with no keybindings, so the tabs were mouse-only."""
+    app = IdeafindrApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = ProjectScreen("run-a")
+        await app.push_screen(screen)
+        await pilot.pause()
+        tabs = screen.query_one("#tabs")
+
+        await pilot.press("2")
+        await pilot.pause()
+        assert tabs.active == "tab-demand"
+        await pilot.press("3")
+        await pilot.pause()
+        assert tabs.active == "tab-search"
+        assert screen.query_one("#search").has_focus, "search tab focuses its input"
+
+
+async def test_tab_key_cycles_through_every_pane(seeded):
+    app = IdeafindrApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = ProjectScreen("run-a")
+        await app.push_screen(screen)
+        await pilot.pause()
+        seen = []
+        for _ in range(4):
+            screen.action_next_tab()
+            await pilot.pause()
+            seen.append(screen.query_one("#tabs").active)
+        assert set(seen) == set(ProjectScreen.TABS), "every pane reachable"
+        assert seen[0] == seen[3], "and it wraps"
+
+
 async def test_project_search_is_scoped_to_that_project(seeded):
     app = IdeafindrApp()
     async with app.run_test() as pilot:
@@ -276,8 +310,7 @@ async def test_delete_asks_before_removing_anything(seeded):
     async with app.run_test() as pilot:
         await pilot.pause()
         home = app.screen
-        await pilot.press("down")           # focus moves into the project list
-        home.query_one("#projects").index = home.run_ids.index("run-a")
+        home.query_one("#rows").index = 1 + home.run_ids.index("run-a")
         await pilot.press("x")
         await pilot.pause()
 
@@ -297,8 +330,7 @@ async def test_confirming_removes_the_project_and_leaves_the_others(seeded):
     async with app.run_test() as pilot:
         await pilot.pause()
         home = app.screen
-        await pilot.press("down")
-        home.query_one("#projects").index = home.run_ids.index("run-a")
+        home.query_one("#rows").index = 1 + home.run_ids.index("run-a")
         await pilot.press("x")
         await pilot.pause()
         await pilot.press("y")
@@ -313,6 +345,18 @@ async def test_confirming_removes_the_project_and_leaves_the_others(seeded):
         finally:
             con.close()
         assert set(app.screen.run_ids) == {"run-b"}, "the list should refresh"
+
+
+async def test_delete_on_the_new_row_does_nothing(seeded):
+    """Row 0 is not a project. Pressing delete there must be inert, not delete
+    whatever happens to be first."""
+    app = IdeafindrApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.screen.query_one("#rows").index == 0
+        await pilot.press("x")
+        await pilot.pause()
+        assert isinstance(app.screen, HomeScreen), "no confirmation should appear"
 
 
 def test_delete_project_also_removes_rendered_reports(seeded, monkeypatch):
