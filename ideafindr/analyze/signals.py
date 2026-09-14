@@ -13,6 +13,21 @@ from datetime import datetime, timedelta, timezone
 from ideafindr.models import Document, Theme
 
 
+# Platforms whose created_at is collection time rather than publication time.
+# WebCollector stamps `now` on every article it extracts, because trafilatura's
+# date extraction is wrong often enough that trusting it would corrupt the trend
+# charts (see collectors/web.py). Those documents are real and count towards
+# volume, themes and the language bank -- they just cannot carry a date, so they
+# must be kept out of every time-series calculation. Left in, they all land in
+# the current week and inflate the recent share of whatever theme they join.
+UNDATED_PLATFORMS = {"web"}
+
+
+def timed(docs: list[Document]) -> list[Document]:
+    """Only the documents whose created_at is a real publication date."""
+    return [d for d in docs if d.platform not in UNDATED_PLATFORMS]
+
+
 def week_key(dt: datetime) -> str:
     d = dt.astimezone(timezone.utc)
     return (d - timedelta(days=d.weekday())).date().isoformat()
@@ -45,12 +60,15 @@ def momentum(docs: list[Document], all_docs: list[Document], recent_days: int = 
 
 def compute_theme_signals(themes: list[Theme], docs: list[Document]) -> list[Theme]:
     by_id = {d.id: d for d in docs}
+    # Both sides of the momentum ratio are filtered: dropping undated documents
+    # from the theme but not the corpus baseline skews the ratio the other way.
+    dated_corpus = timed(docs)
     for t in themes:
         tdocs = [by_id[i] for i in t.doc_ids if i in by_id]
         t.volume = len(tdocs)
         t.engagement_weighted = round(sum(d.engagement_score() for d in tdocs), 1)
-        t.trend = theme_trend(tdocs)
-        t.momentum = momentum(tdocs, docs)
+        t.trend = theme_trend(timed(tdocs))
+        t.momentum = momentum(timed(tdocs), dated_corpus)
     # Rank by what a marketer should look at first: size, weighted by growth.
     # Incoherent clusters sort last regardless of size -- a big pile of unrelated
     # posts is the least actionable thing in the report, not the fourth most.
@@ -78,10 +96,14 @@ def share_of_voice(
 
     for d in docs:
         text = d.searchable_text
+        dated = d.platform not in UNDATED_PLATFORMS
         for b, p in pats.items():
             if p.search(text):
                 totals[b] += 1
-                weekly[b][week_key(d.created_at)] += 1
+                # Mentions count wherever they appear, but only dated documents
+                # may shape the trend line -- same reasoning as theme momentum.
+                if dated:
+                    weekly[b][week_key(d.created_at)] += 1
                 engagement[b] += d.engagement_score()
 
     total_mentions = sum(totals.values()) or 1

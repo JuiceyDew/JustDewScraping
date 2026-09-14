@@ -8,6 +8,7 @@ from ideafindr.analyze.signals import (
     momentum,
     share_of_voice,
     strip_noise,
+    week_key,
 )
 from ideafindr.embed import TfidfEmbedder, _l2
 from tests.conftest import make_doc
@@ -57,6 +58,42 @@ def test_momentum_is_relative_to_corpus_not_raw_recency():
     fading = [x for x in corpus if (now - x.created_at).days > 90]
     assert momentum(rising, corpus) > 1.2
     assert momentum(fading, corpus) < 0.5
+
+
+def test_web_documents_do_not_inflate_momentum():
+    """Web articles carry their COLLECTION date, not their publication date, so
+    they all land in the current week. Counted in the time series they inflate
+    the recent share of whatever theme they join -- which is what made the
+    highest-momentum theme in a real report 94% web articles."""
+    from ideafindr.models import Theme
+
+    now = datetime.now(timezone.utc)
+    def d(i, days, platform="reddit"):
+        x = make_doc(i, f"some text about chillers {i}", platform=platform)
+        x.created_at = now - timedelta(days=days)
+        return x
+
+    corpus = [d(i, i * 3) for i in range(40)]                     # spread over 120 days
+    theme_ids = [x.id for x in corpus if (now - x.created_at).days > 90]
+    theme = Theme(id=0, label="old theme", doc_ids=list(theme_ids))
+    before = compute_theme_signals([theme], corpus)[0].momentum
+
+    # Same theme, now padded with web articles stamped `now`.
+    web = [d(1000 + i, 0, platform="web") for i in range(15)]
+    theme2 = Theme(id=0, label="old theme", doc_ids=theme_ids + [w.id for w in web])
+    after = compute_theme_signals([theme2], corpus + web)[0]
+
+    assert after.momentum == before, "undated web docs must not move momentum"
+    assert after.volume == len(theme_ids) + len(web), "but they still count as documents"
+    assert all(wk != week_key(now) for wk, _ in after.trend), "and never enter the trend"
+
+
+def test_share_of_voice_trend_excludes_undated_web_documents():
+    docs = [make_doc(1, "the Plunge brand tub is good", days_ago=40),
+            make_doc(2, "Plunge shipping was slow", platform="web", kind="article")]
+    sov = share_of_voice(docs, ["Plunge"])
+    assert sov["Plunge"]["mentions"] == 2, "web mentions still count towards share"
+    assert len(sov["Plunge"]["trend"]) == 1, "but only the dated one shapes the trend"
 
 
 def test_share_of_voice_uses_word_boundaries():
