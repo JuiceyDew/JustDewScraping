@@ -148,38 +148,63 @@ along, so if you switch models you find out immediately.
 
 ## Using it
 
-`ideafindr` with no arguments opens the TUI, which is the primary interface:
+`ideafindr` with no arguments opens the TUI, which is the primary interface.
 
 ```bash
 ideafindr
 ```
 
+Three screens, each doing one thing.
+
+**Home** is a prompt and your past projects, and nothing else:
+
 ```
- Runs                  │ Themes  Demand  Search  Compare
- cold plunge tubs  716 │  1  Recovery and relapse stories   104  1.07  pain point
- cold plunge tubs  673 │  2  Chiller sizing and insulation   99  0.83  question
-                       │  3  Water flow and pump problems    53  1.09  pain point
-───────────────────────┴────────────────────────────────────────────────────────
- 20:33:01  discovered r/coldplunge(13,000), r/becomingtheiceman(8,200)
- 20:33:04  collector reddit returned 681 documents
+                          IDEAFINDR
+             what people say · what people search
+
+   ┌────────────────────────────────────────────────────┐
+   │ Research a topic…                                  │
+   └────────────────────────────────────────────────────┘
+        enter to research · ↑↓ then enter to open a project
+
+   Projects
+    cold plunge tubs    716 docs · 19 themes · 12 intents · Sep 13
+    cold plunge tubs    673 docs · 18 themes · Sep 12
 ```
 
-| key | |
+Typing a topic runs the whole pipeline — plan, collect, cluster, harvest search
+demand, write the report — on a **Research** screen that shows each stage as it
+happens, with the pipeline's own log underneath:
+
+```
+   Researching “cold plunge tubs”
+
+     ✓  Plan the sweep          12 subreddits, 8 keywords
+     ✓  Collect the corpus      716 documents
+     ⠿  Cluster into themes
+     ·  Harvest search demand
+     ·  Write the report
+
+   ┌──────────────────────────────────────────────────────────┐
+   │ 20:45:36  discovered r/coldplunge(13,000), r/becoming…    │
+   │ 20:45:36  collector reddit returned 681 documents         │
+   └──────────────────────────────────────────────────────────┘
+```
+
+Each past project opens as its **own page** — themes, search demand and full-text
+search over that corpus, with `esc` to go back:
+
+| key | on a project page |
 |---|---|
-| `n` | new run — prompts for a topic, then collects with live status |
-| `a` | analyze the selected run into themes |
-| `d` | harvest search demand and find content gaps |
-| `r` | render the report |
-| `s` | search the corpus (full-text, scoped to the selected run) |
-| `c` | compare the selected run against the next one |
+| `s` | search this project's corpus |
+| `a` | re-cluster into themes |
+| `d` | harvest search demand |
+| `r` | write the report |
+| `esc` | back to home |
 | `^t` | toggle light/dark |
 
-It uses your terminal's own 16-colour palette rather than hardcoded colours, so
-it matches whatever scheme you already run.
-
-The activity panel is the pipeline's own log, so a collection shows which
-subreddits resolved, how much came back and what got dropped as off-topic —
-rather than a spinner.
+The app uses your terminal's own 16-colour palette rather than hardcoded colours,
+so it matches whatever scheme you already run.
 
 ### Commands
 

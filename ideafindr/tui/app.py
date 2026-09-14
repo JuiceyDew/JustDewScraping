@@ -1,38 +1,44 @@
-"""The Ideafindr TUI -- the primary interface.
+"""The Ideafindr TUI.
 
-Why this exists rather than more CLI: every interesting thing this tool does takes
-minutes and produces more output than a terminal table can hold. `collect` showed
-a spinner reading "Collecting…" for several minutes with no indication of which
-subreddit it was on or how much it had found; the corpus had a full-text index
-with no way to search it; and comparing two runs of the same topic meant reading
-two 55KB HTML files side by side.
+Three screens, each doing one thing, rather than one dashboard doing all of them:
 
-Theming: the app runs with `ansi_color = True` and an ANSI theme, so every colour
-resolves to one of the terminal's own 16 palette entries rather than a hardcoded
-RGB value. It therefore matches whatever colour scheme the terminal already uses,
-light or dark, instead of imposing its own.
+    Home      a prompt and a list of past projects. Nothing else.
+    Research  one topic being worked, stage by stage, with live detail.
+    Project   one past project, opened as its own page.
+
+The first version put runs, themes, demand, search, compare and a log panel on a
+single screen. Everything was visible and nothing was legible: the thing you
+actually came to do -- research a topic -- was a keystroke buried among six
+others. Home is now almost empty on purpose, and the deep research flow is the
+default action rather than one option among many.
+
+Theming: `ansi_color = True` with an ANSI theme, so every colour resolves to one
+of the terminal's own 16 palette entries and the app matches whatever scheme the
+terminal already uses.
 
 Threading: the pipeline is synchronous and calls asyncio.run() internally
-(pipeline.run_collection), which raises inside Textual's running event loop. Every
-pipeline call therefore goes through a threaded worker, and progress comes back
-through a logging handler rather than by refactoring every collector to take a
-callback.
+(pipeline.run_collection), which raises inside Textual's running event loop, so
+every pipeline call goes through a threaded worker. Live detail comes from
+capturing the pipeline's own log records rather than threading a progress
+callback through every collector.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Center, Horizontal, Vertical, VerticalScroll
+from textual.screen import Screen
 from textual.widgets import (
     DataTable,
     Footer,
-    Header,
     Input,
     Label,
+    ListItem,
+    ListView,
     RichLog,
     Static,
     TabbedContent,
@@ -40,19 +46,23 @@ from textual.widgets import (
 )
 
 from ideafindr import pipeline
-from ideafindr.analyze.signals import corpus_stats
+from ideafindr.analyze.signals import corpus_stats, language_bank, share_of_voice
+from ideafindr.report.render import render
 from ideafindr.store import db
 
 log = logging.getLogger(__name__)
 
+DAYS = 180
+
 
 class TuiLogHandler(logging.Handler):
-    """Pipe the pipeline's own log records into the activity panel.
+    """Route the pipeline's own log records to whichever screen is watching.
 
-    The collectors already log the things worth watching -- which subreddits
-    resolved, how many posts came back, what got dropped as off-topic, when Arctic
-    Shift asked us to slow down. Capturing those gives a live view of a run
-    without threading a progress callback through every collector.
+    The collectors already log what is worth seeing -- which subreddits resolved,
+    how many posts came back, what was dropped as off-topic, when Arctic Shift
+    asks us to slow down. Only the research screen displays them; elsewhere they
+    are dropped, because a log panel on every page is exactly the clutter this
+    layout removes.
     """
 
     def __init__(self, app: "IdeafindrApp") -> None:
@@ -64,427 +74,499 @@ class TuiLogHandler(logging.Handler):
             msg = self.format(record)
         except Exception:  # noqa: BLE001
             return
-        style = {
-            logging.WARNING: "yellow",
-            logging.ERROR: "red",
-            logging.CRITICAL: "red",
-        }.get(record.levelno, "")
-        # Log records arrive on worker threads; the UI must be touched on the
-        # app's own thread.
+        style = "yellow" if record.levelno >= logging.WARNING else ""
         try:
-            self._app.call_from_thread(self._app.write_activity, msg, style)
+            self._app.call_from_thread(self._app.relay_log, msg, style)
+        except RuntimeError:
+            # call_from_thread refuses to run on the app's own thread. Anything
+            # logged from the UI thread rather than a worker lands here, and
+            # would otherwise be dropped silently.
+            try:
+                self._app.relay_log(msg, style)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001 - app shutting down
             pass
 
 
-class IdeafindrApp(App):
-    """Browse runs, search the corpus, and drive the pipeline with live status."""
+def _project_rows() -> list[tuple[str, str, str]]:
+    """(run_id, topic, one-line summary) for every stored run, newest first."""
+    con = db.connect()
+    try:
+        out = []
+        for r in db.list_runs(con):
+            themes = len(db.load_themes(con, r.id))
+            demand = len(db.load_demand_clusters(con, r.id))
+            bits = [f"{r.doc_count} docs"]
+            if themes:
+                bits.append(f"{themes} themes")
+            if demand:
+                bits.append(f"{demand} intents")
+            bits.append(r.created_at.strftime("%b %d"))
+            out.append((r.id, r.topic, "  ·  ".join(bits)))
+        return out
+    finally:
+        con.close()
 
-    # Use the terminal's own palette instead of hardcoded RGB.
-    ansi_color = True
 
-    CSS = """
-    Screen { layout: vertical; }
-    #body { height: 1fr; }
-    #runs-pane { width: 34%; border: round $foreground 30%; }
-    #detail-pane { width: 1fr; border: round $foreground 30%; }
-    #activity { height: 22%; border: round $foreground 30%; }
-    .pane-title { padding: 0 1; text-style: bold; }
-    #status { padding: 0 1; height: 1; }
-    DataTable { height: 1fr; }
-    Input { border: round $foreground 30%; }
-    #search-results { height: 1fr; }
-    """
+# --- home ---------------------------------------------------------------------
+
+
+class HomeScreen(Screen):
+    """A prompt and your past projects. Deliberately almost empty."""
 
     BINDINGS = [
-        ("n", "new_run", "New run"),
-        ("a", "analyze", "Analyze"),
-        ("d", "demand", "Demand"),
-        ("r", "report", "Report"),
-        ("s", "focus_search", "Search"),
-        ("c", "compare", "Compare"),
+        ("escape", "clear", "Clear"),
         ("f5", "refresh", "Refresh"),
         ("ctrl+t", "cycle_theme", "Theme"),
         ("q", "quit", "Quit"),
     ]
 
-    def __init__(self, **kw) -> None:
-        super().__init__(**kw)
-        self.run_ids: list[str] = []
-        self.busy = False
-        self._awaiting_topic = False
-
-    # --- layout ---------------------------------------------------------------
+    CSS = """
+    HomeScreen { align: center top; }
+    #hero { width: 72; margin-top: 2; }
+    #wordmark { text-style: bold; width: 100%; content-align: center middle; }
+    #tagline { color: $foreground 55%; width: 100%; content-align: center middle;
+               margin-bottom: 2; }
+    #topic { width: 100%; }
+    #hint { color: $foreground 45%; width: 100%; content-align: center middle;
+            margin-bottom: 2; }
+    #projects-label { text-style: bold; margin-bottom: 1; }
+    #projects { height: auto; max-height: 14; background: transparent; }
+    /* Without explicit heights the inner Horizontal takes 1fr and each row
+       becomes as tall as the list, hiding every project but the first. */
+    #projects ListItem { height: 1; padding: 0 1; background: transparent; }
+    #projects ListItem Static { height: 1; }
+    #empty { color: $foreground 45%; }
+    """
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        yield Static("Ready", id="status")
-        with Horizontal(id="body"):
-            with Vertical(id="runs-pane"):
-                yield Label("Runs", classes="pane-title")
-                yield DataTable(id="runs", cursor_type="row", zebra_stripes=True)
-            with Vertical(id="detail-pane"):
-                with TabbedContent(id="tabs"):
-                    with TabPane("Themes", id="tab-themes"):
-                        yield DataTable(id="themes", cursor_type="row")
-                    with TabPane("Demand", id="tab-demand"):
-                        yield DataTable(id="demand", cursor_type="row")
-                    with TabPane("Search", id="tab-search"):
-                        yield Input(
-                            placeholder="Search this run's corpus…", id="search-input"
-                        )
-                        yield DataTable(id="search-results", cursor_type="row")
-                    with TabPane("Compare", id="tab-compare"):
-                        yield DataTable(id="compare", cursor_type="row")
-        yield RichLog(id="activity", highlight=False, markup=True, wrap=True)
+        with Center():
+            with Vertical(id="hero"):
+                yield Static("IDEAFINDR", id="wordmark")
+                yield Static("what people say · what people search", id="tagline")
+                yield Input(placeholder="Research a topic…", id="topic")
+                yield Static("enter to research  ·  ↑↓ then enter to open a project",
+                             id="hint")
+                yield Label("Projects", id="projects-label")
+                yield ListView(id="projects")
         yield Footer()
 
     def on_mount(self) -> None:
+        self.query_one("#topic", Input).focus()
+        self.action_refresh()
+
+    def action_refresh(self) -> None:
+        listing = self.query_one("#projects", ListView)
+        listing.clear()
+        self.run_ids: list[str] = []
+        rows = _project_rows()
+        if not rows:
+            listing.append(ListItem(Static("No projects yet — type a topic above.",
+                                           id="empty")))
+            return
+        for rid, topic, meta in rows:
+            self.run_ids.append(rid)
+            # One Static per row, not a Horizontal of two: side-by-side widgets
+            # each defaulted to the full width, so the first pushed the second
+            # off the row entirely. Markup gives the same two-tone look with one
+            # widget and no layout arithmetic.
+            listing.append(
+                ListItem(Static(f"[b]{topic[:28]:<28}[/b] [dim]{meta}[/dim]"))
+            )
+
+    def action_clear(self) -> None:
+        self.query_one("#topic", Input).value = ""
+
+    def action_cycle_theme(self) -> None:
+        self.app.action_cycle_theme()
+
+    @on(Input.Submitted, "#topic")
+    def start(self, event: Input.Submitted) -> None:
+        topic = event.value.strip()
+        if not topic:
+            return
+        self.query_one("#topic", Input).value = ""
+        # A slash command is someone reaching for a way out, not a topic. Without
+        # this, typing "/exit" scraped the web for the phrase "/exit" and left a
+        # zero-document project behind.
+        if topic.startswith("/"):
+            if topic.lower() in ("/exit", "/quit", "/q"):
+                self.app.exit()
+            else:
+                self.notify(f"Unknown command {topic}. Type a topic, or q to quit.",
+                            severity="warning")
+            return
+        self.app.push_screen(ResearchScreen(topic))
+
+    @on(ListView.Selected, "#projects")
+    def open_project(self, event: ListView.Selected) -> None:
+        idx = event.list_view.index
+        if idx is not None and 0 <= idx < len(getattr(self, "run_ids", [])):
+            self.app.push_screen(ProjectScreen(self.run_ids[idx]))
+
+
+# --- research -----------------------------------------------------------------
+
+STAGES = [
+    ("plan", "Plan the sweep"),
+    ("collect", "Collect the corpus"),
+    ("analyze", "Cluster into themes"),
+    ("demand", "Harvest search demand"),
+    ("report", "Write the report"),
+]
+
+
+class ResearchScreen(Screen):
+    """One topic, worked end to end, with the stages visible."""
+
+    BINDINGS = [
+        ("escape", "leave", "Back"),
+        ("ctrl+t", "cycle_theme", "Theme"),
+    ]
+
+    CSS = """
+    ResearchScreen { align: center top; }
+    #work { width: 82; margin-top: 2; }
+    #heading { text-style: bold; margin-bottom: 1; }
+    .stage { height: 1; }
+    .stage-done { color: green; }
+    .stage-active { text-style: bold; }
+    .stage-todo { color: $foreground 40%; }
+    .stage-failed { color: red; }
+    #detail { height: 14; border: round $foreground 25%; margin-top: 1; }
+    """
+
+    def __init__(self, topic: str) -> None:
+        super().__init__()
+        self.topic = topic
+        self.run_id: str | None = None
+        self.finished = False
+
+    def compose(self) -> ComposeResult:
+        with Center():
+            with Vertical(id="work"):
+                yield Static(f"Researching “{self.topic}”", id="heading")
+                for key, title in STAGES:
+                    yield Static(f"  ·  {title}", id=f"stage-{key}", classes="stage stage-todo")
+                yield RichLog(id="detail", markup=True, wrap=True, highlight=False)
+        yield Footer()
+
+    def on_mount(self) -> None:
+        self.app.log_sink = self
+        self.deep_research()
+
+    def on_unmount(self) -> None:
+        if getattr(self.app, "log_sink", None) is self:
+            self.app.log_sink = None
+
+    def write_detail(self, message: str, style: str = "") -> None:
+        stamp = datetime.now().strftime("%H:%M:%S")
+        body = f"[{style}]{message}[/{style}]" if style else message
+        self.query_one("#detail", RichLog).write(f"[dim]{stamp}[/dim] {body}")
+
+    def stage(self, key: str, state: str, note: str = "") -> None:
+        marks = {"active": "⠿", "done": "✓", "failed": "✗", "todo": "·"}
+        title = dict(STAGES)[key]
+        widget = self.query_one(f"#stage-{key}", Static)
+        widget.set_classes(f"stage stage-{state}")
+        suffix = f"   {note}" if note else ""
+        widget.update(f"  {marks[state]}  {title}{suffix}")
+
+    def action_leave(self) -> None:
+        """Leave the screen. The worker keeps running; its results are stored."""
+        if self.finished and self.run_id:
+            self.app.switch_screen(ProjectScreen(self.run_id))
+        else:
+            self.app.pop_screen()
+
+    def action_cycle_theme(self) -> None:
+        self.app.action_cycle_theme()
+
+    @work(thread=True, exclusive=True)
+    def deep_research(self) -> None:
+        """Plan, collect, analyse, harvest demand and render, in one pass.
+
+        Threaded because pipeline.run_collection calls asyncio.run() internally,
+        which raises inside Textual's event loop.
+        """
+        app = self.app
+
+        def ui(fn, *a) -> None:
+            app.call_from_thread(fn, *a)
+
+        try:
+            ui(self.stage, "plan", "active")
+            plan = pipeline.plan_for(self.topic, DAYS)
+            ui(self.stage, "plan", "done",
+               f"{len(plan.subreddits)} subreddits, {len(plan.keywords)} keywords")
+
+            ui(self.stage, "collect", "active")
+            rid, n = pipeline.run_collection(
+                self.topic, ["reddit", "web"], DAYS, 600, plan=plan
+            )
+            self.run_id = rid
+            if not n:
+                ui(self.stage, "collect", "failed", "nothing collected")
+                ui(self.write_detail,
+                   "Nothing collected. Try a broader topic or a longer window.", "yellow")
+                return
+            ui(self.stage, "collect", "done", f"{n} documents")
+
+            ui(self.stage, "analyze", "active")
+            themes = pipeline.run_analysis(rid)
+            ui(self.stage, "analyze", "done", f"{len(themes)} themes")
+
+            ui(self.stage, "demand", "active")
+            try:
+                clusters = pipeline.run_demand(rid, depth=1)
+                ui(self.stage, "demand", "done", f"{len(clusters)} search intents")
+            except Exception as e:  # noqa: BLE001 - demand is not worth losing a corpus over
+                clusters = []
+                ui(self.stage, "demand", "failed", str(e)[:40])
+
+            ui(self.stage, "report", "active")
+            con = db.connect()
+            try:
+                run = db.get_run(con, rid)
+                docs = list(db.iter_documents(con, rid))
+            finally:
+                con.close()
+            md, _ = render(
+                run=run, themes=themes, stats=corpus_stats(docs),
+                language=language_bank(docs),
+                sov=share_of_voice(docs, run.plan.brands),
+                summary="", demand=clusters,
+            )
+            ui(self.stage, "report", "done", str(md.parent))
+            self.finished = True
+            ui(self.write_detail, "Done. Press esc to open the project.", "green")
+        except Exception as e:  # noqa: BLE001
+            ui(self.write_detail, f"Failed: {e}", "red")
+
+
+# --- project ------------------------------------------------------------------
+
+
+class ProjectScreen(Screen):
+    """One past project, on its own page."""
+
+    BINDINGS = [
+        ("escape", "back", "Back"),
+        ("s", "focus_search", "Search"),
+        ("a", "analyze", "Re-analyze"),
+        ("d", "demand", "Demand"),
+        ("r", "report", "Report"),
+        ("ctrl+t", "cycle_theme", "Theme"),
+    ]
+
+    CSS = """
+    #proj-head { text-style: bold; padding: 0 1; height: 1; }
+    #proj-sub { color: $foreground 55%; padding: 0 1; height: 1; margin-bottom: 1; }
+    #proj-status { color: $foreground 55%; padding: 0 1; height: 1; }
+    /* Without this the tabs claim the whole screen height rather than what is
+       left after the heading rows, and the heading scrolls off the top. */
+    #tabs { height: 1fr; }
+    DataTable { height: 1fr; }
+    """
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__()
+        self.run_id = run_id
+        self.topic = run_id
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="proj-head")
+        yield Static("", id="proj-sub")
+        with TabbedContent(id="tabs"):
+            with TabPane("Themes", id="tab-themes"):
+                yield DataTable(id="themes", cursor_type="row")
+            with TabPane("Demand", id="tab-demand"):
+                yield DataTable(id="demand", cursor_type="row")
+            with TabPane("Search", id="tab-search"):
+                yield Input(placeholder="Search this corpus…", id="search")
+                yield DataTable(id="results", cursor_type="row")
+        yield Static("", id="proj-status")
+        yield Footer()
+
+    def on_mount(self) -> None:
+        t = self.query_one("#themes", DataTable)
+        t.add_column("#", width=3)
+        t.add_column("Theme", width=52)
+        t.add_column("Docs", width=6)
+        t.add_column("Mom.", width=6)
+        t.add_column("Stance", width=11)
+
+        d = self.query_one("#demand", DataTable)
+        d.add_column("#", width=3)
+        d.add_column("Search intent", width=46)
+        d.add_column("Queries", width=8)
+        d.add_column("Corpus", width=7)
+        d.add_column("Gap", width=7)
+
+        r = self.query_one("#results", DataTable)
+        r.add_column("Where", width=18)
+        r.add_column("Text", width=72)
+        r.add_column("Date", width=11)
+
+        self.app.log_sink = None
+        self.load()
+
+    def load(self) -> None:
+        con = db.connect()
+        try:
+            run = db.get_run(con, self.run_id)
+            themes = db.load_themes(con, self.run_id)
+            clusters = db.load_demand_clusters(con, self.run_id)
+            docs = list(db.iter_documents(con, self.run_id))
+        finally:
+            con.close()
+        if not run:
+            self.query_one("#proj-head", Static).update("Unknown project")
+            return
+
+        self.topic = run.topic
+        stats = corpus_stats(docs)
+        self.query_one("#proj-head", Static).update(run.topic)
+        self.query_one("#proj-sub", Static).update(
+            f"{stats.get('documents', 0)} documents  ·  "
+            f"{stats.get('earliest', '—')} → {stats.get('latest', '—')}  ·  {self.run_id}"
+        )
+
+        tt = self.query_one("#themes", DataTable)
+        tt.clear()
+        for i, t in enumerate(themes, 1):
+            tt.add_row(str(i), t.label[:52], str(t.volume),
+                       f"{t.momentum:.2f}", t.stance.replace("_", " "))
+
+        dt = self.query_one("#demand", DataTable)
+        dt.clear()
+        for i, c in enumerate(clusters, 1):
+            dt.add_row(str(i), c.label[:46], str(len(c.unique_texts())),
+                       str(c.coverage), f"{c.gap:+.2f}")
+
+        hints = []
+        if not themes:
+            hints.append("press a to analyze")
+        if not clusters:
+            hints.append("press d to harvest demand")
+        self.set_status("  ·  ".join(hints))
+
+    def set_status(self, text: str) -> None:
+        self.query_one("#proj-status", Static).update(text)
+
+    def action_back(self) -> None:
+        self.app.pop_screen()
+
+    def action_cycle_theme(self) -> None:
+        self.app.action_cycle_theme()
+
+    def action_focus_search(self) -> None:
+        self.query_one("#tabs", TabbedContent).active = "tab-search"
+        self.query_one("#search", Input).focus()
+
+    @on(Input.Submitted, "#search")
+    def search(self, event: Input.Submitted) -> None:
+        self.do_search(event.value)
+
+    def do_search(self, value: str) -> None:
+        results = self.query_one("#results", DataTable)
+        results.clear()
+        query = value.strip()
+        if not query:
+            return
+        con = db.connect()
+        try:
+            ids = db.search_fts(con, self.run_id, query, limit=200)
+            docs = db.get_documents(con, self.run_id, ids)
+        finally:
+            con.close()
+        order = {d: i for i, d in enumerate(ids)}
+        docs.sort(key=lambda d: order.get(d.id, 9999))
+        for d in docs:
+            where = f"{d.platform}/{d.community}" if d.community else d.platform
+            results.add_row(where[:18],
+                            " ".join(d.searchable_text.split())[:72],
+                            d.created_at.strftime("%Y-%m-%d"))
+        self.set_status(f"{len(docs)} match(es) for “{query}”")
+
+    def action_analyze(self) -> None:
+        self.set_status("Re-analyzing…")
+        self.job("analyze")
+
+    def action_demand(self) -> None:
+        self.set_status("Harvesting search demand… (about a minute)")
+        self.job("demand")
+
+    def action_report(self) -> None:
+        self.set_status("Rendering…")
+        self.job("report")
+
+    @work(thread=True, exclusive=True)
+    def job(self, kind: str) -> None:
+        app = self.app
+        try:
+            if kind == "analyze":
+                n = len(pipeline.run_analysis(self.run_id))
+                msg = f"{n} themes"
+            elif kind == "demand":
+                n = len(pipeline.run_demand(self.run_id, depth=1))
+                msg = f"{n} search intents"
+            else:
+                con = db.connect()
+                try:
+                    run = db.get_run(con, self.run_id)
+                    themes = db.load_themes(con, self.run_id)
+                    docs = list(db.iter_documents(con, self.run_id))
+                    clusters = db.load_demand_clusters(con, self.run_id)
+                finally:
+                    con.close()
+                if not themes:
+                    raise ValueError("analyze the project first")
+                md, _ = render(
+                    run=run, themes=themes, stats=corpus_stats(docs),
+                    language=language_bank(docs),
+                    sov=share_of_voice(docs, run.plan.brands),
+                    summary="", demand=clusters,
+                )
+                msg = f"written to {md.parent}"
+            app.call_from_thread(self.set_status, msg)
+            app.call_from_thread(self.load)
+        except Exception as e:  # noqa: BLE001
+            app.call_from_thread(self.set_status, f"Failed: {e}")
+
+
+# --- app ----------------------------------------------------------------------
+
+
+class IdeafindrApp(App):
+    """Research a topic, then read the project it produced."""
+
+    ansi_color = True
+    TITLE = "Ideafindr"
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.log_sink: ResearchScreen | None = None
+
+    def on_mount(self) -> None:
         self.theme = "ansi-dark"
-        self.title = "Ideafindr"
-        self.sub_title = "say · search · gaps"
-
-        # Widths are explicit because auto-sizing spends the space on the widest
-        # column and truncates the rest -- "Stance" came out as "Sta"/"neu".
-        runs = self.query_one("#runs", DataTable)
-        runs.add_column("Topic", width=18)
-        runs.add_column("Docs", width=5)
-        runs.add_column("When", width=11)
-
-        themes = self.query_one("#themes", DataTable)
-        themes.add_column("#", width=3)
-        themes.add_column("Theme", width=44)
-        themes.add_column("Docs", width=5)
-        themes.add_column("Mom.", width=5)
-        themes.add_column("Stance", width=10)
-
-        demand = self.query_one("#demand", DataTable)
-        demand.add_column("#", width=3)
-        demand.add_column("Search intent", width=40)
-        demand.add_column("Qs", width=4)
-        demand.add_column("Demand", width=7)
-        demand.add_column("Corpus", width=6)
-        demand.add_column("Gap", width=6)
-
-        search = self.query_one("#search-results", DataTable)
-        search.add_column("Where", width=16)
-        search.add_column("Text", width=64)
-        search.add_column("Date", width=11)
-
-        comp = self.query_one("#compare", DataTable)
-        comp.add_column("Metric", width=16)
-        comp.add_column("A", width=26)
-        comp.add_column("B", width=26)
-
         handler = TuiLogHandler(self)
         handler.setFormatter(logging.Formatter("%(message)s"))
         root = logging.getLogger("ideafindr")
         root.setLevel(logging.INFO)
         root.addHandler(handler)
         logging.getLogger("httpx").setLevel(logging.WARNING)
+        self.push_screen(HomeScreen())
 
-        self.write_activity("Ideafindr ready. n = new run, s = search, ? = keys.")
-        self.action_refresh()
-
-    # --- helpers --------------------------------------------------------------
-
-    def write_activity(self, message: str, style: str = "") -> None:
-        panel = self.query_one("#activity", RichLog)
-        stamp = datetime.now().strftime("%H:%M:%S")
-        body = f"[{style}]{message}[/{style}]" if style else message
-        panel.write(f"[dim]{stamp}[/dim] {body}")
-
-    def set_status(self, text: str, working: bool = False) -> None:
-        marker = "⠿ " if working else ""
-        self.query_one("#status", Static).update(f"{marker}{text}")
-
-    def selected_run(self) -> str | None:
-        table = self.query_one("#runs", DataTable)
-        if not self.run_ids or table.cursor_row is None:
-            return None
-        if not (0 <= table.cursor_row < len(self.run_ids)):
-            return None
-        return self.run_ids[table.cursor_row]
-
-    def guard_busy(self) -> bool:
-        """True when a job is already running, so actions don't stack."""
-        if self.busy:
-            self.write_activity("A job is already running; wait for it.", "yellow")
-            return True
-        return False
-
-    # --- loading --------------------------------------------------------------
-
-    def action_refresh(self) -> None:
-        table = self.query_one("#runs", DataTable)
-        table.clear()
-        self.run_ids = []
-        con = db.connect()
-        try:
-            rows = db.list_runs(con)
-        finally:
-            con.close()
-        for r in rows:
-            self.run_ids.append(r.id)
-            table.add_row(
-                r.topic[:18], str(r.doc_count), r.created_at.strftime("%m-%d %H:%M")
-            )
-        if rows:
-            self.load_detail(rows[0].id)
-            self.set_status(f"{len(rows)} run(s)")
-        else:
-            self.set_status("No runs yet — press n to start one")
-
-    def load_detail(self, run_id: str) -> None:
-        con = db.connect()
-        try:
-            themes = db.load_themes(con, run_id)
-            clusters = db.load_demand_clusters(con, run_id)
-        finally:
-            con.close()
-
-        tt = self.query_one("#themes", DataTable)
-        tt.clear()
-        for i, t in enumerate(themes, 1):
-            tt.add_row(str(i), t.label[:44], str(t.volume),
-                       f"{t.momentum:.2f}", t.stance.replace("_", " "))
-
-        dt = self.query_one("#demand", DataTable)
-        dt.clear()
-        for i, c in enumerate(clusters, 1):
-            dt.add_row(str(i), c.label[:40], str(len(c.unique_texts())),
-                       f"{c.demand_score:.1f}", str(c.coverage), f"{c.gap:+.2f}")
-
-        if not themes:
-            self.write_activity(f"{run_id} has no themes yet — press a to analyze.")
-        if not clusters:
-            self.write_activity(f"{run_id} has no demand data — press d to harvest.")
-
-    @on(DataTable.RowHighlighted, "#runs")
-    def on_run_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        rid = self.selected_run()
-        if rid:
-            self.load_detail(rid)
-            self.set_status(rid)
-
-    # --- search ---------------------------------------------------------------
-
-    def action_focus_search(self) -> None:
-        self.query_one("#tabs", TabbedContent).active = "tab-search"
-        self.query_one("#search-input", Input).focus()
-
-    @on(Input.Submitted, "#search-input")
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        """One handler, two modes -- the input doubles as the topic prompt.
-
-        Textual dispatches an event to every matching handler, so these cannot be
-        two separate @on methods on the same selector: both would fire and a
-        search would also start a collection run.
-        """
-        if self._awaiting_topic:
-            self._awaiting_topic = False
-            inp = self.query_one("#search-input", Input)
-            inp.placeholder = "Search this run's corpus…"
-            inp.value = ""
-            topic = event.value.strip()
-            if topic:
-                self.collect_worker(topic)
-            return
-        self._do_search(event.value)
-
-    def _do_search(self, value: str) -> None:
-        rid = self.selected_run()
-        if not rid:
-            self.write_activity("No run selected.", "yellow")
-            return
-        query = value.strip()
-        results = self.query_one("#search-results", DataTable)
-        results.clear()
-        if not query:
-            return
-        con = db.connect()
-        try:
-            doc_ids = db.search_fts(con, rid, query, limit=200)
-            docs = db.get_documents(con, rid, doc_ids)
-        finally:
-            con.close()
-        order = {d: i for i, d in enumerate(doc_ids)}
-        docs.sort(key=lambda d: order.get(d.id, 9999))
-        for d in docs:
-            text = " ".join(d.searchable_text.split())[:64]
-            where = f"{d.platform}/{d.community}" if d.community else d.platform
-            results.add_row(where[:16], text, d.created_at.strftime("%Y-%m-%d"))
-        self.write_activity(f"search {query!r}: {len(docs)} document(s)")
-        self.set_status(f"{len(docs)} match(es) for {query!r}")
-
-    # --- compare --------------------------------------------------------------
-
-    def action_compare(self) -> None:
-        """Compare the selected run against the next one in the list."""
-        rid = self.selected_run()
-        if not rid or len(self.run_ids) < 2:
-            self.write_activity("Need two runs to compare.", "yellow")
-            return
-        i = self.run_ids.index(rid)
-        other = self.run_ids[(i + 1) % len(self.run_ids)]
-
-        con = db.connect()
-        try:
-            stats = {}
-            for key in (rid, other):
-                docs = list(db.iter_documents(con, key))
-                themes = db.load_themes(con, key)
-                clusters = db.load_demand_clusters(con, key)
-                cs = corpus_stats(docs)
-                stats[key] = {
-                    "Documents": str(cs.get("documents", 0)),
-                    "Posts": str(cs.get("posts", 0)),
-                    "Comments": str(cs.get("comments", 0)),
-                    "Articles": str(cs.get("articles", 0)),
-                    "Authors": str(cs.get("authors", 0)),
-                    "Date range": f"{cs.get('earliest','—')} → {cs.get('latest','—')}",
-                    "Themes": str(len(themes)),
-                    "Top theme": themes[0].label[:34] if themes else "—",
-                    "Demand intents": str(len(clusters)),
-                    "Biggest gap": f"{clusters[0].gap:+.2f}" if clusters else "—",
-                }
-        finally:
-            con.close()
-
-        table = self.query_one("#compare", DataTable)
-        table.clear()
-        table.add_row("run", rid[:22], other[:22])
-        for metric in stats[rid]:
-            table.add_row(metric, stats[rid][metric], stats[other][metric])
-        self.query_one("#tabs", TabbedContent).active = "tab-compare"
-        self.write_activity(f"comparing {rid} against {other}")
-
-    # --- pipeline actions -----------------------------------------------------
-
-    def action_new_run(self) -> None:
-        if self.guard_busy():
-            return
-        self.query_one("#tabs", TabbedContent).active = "tab-search"
-        inp = self.query_one("#search-input", Input)
-        inp.placeholder = "Topic to research, then Enter (Esc to cancel)…"
-        inp.value = ""
-        inp.focus()
-        self._awaiting_topic = True
-
-    def action_analyze(self) -> None:
-        rid = self.selected_run()
-        if rid and not self.guard_busy():
-            self.analyze_worker(rid)
-
-    def action_demand(self) -> None:
-        rid = self.selected_run()
-        if rid and not self.guard_busy():
-            self.demand_worker(rid)
-
-    def action_report(self) -> None:
-        rid = self.selected_run()
-        if rid and not self.guard_busy():
-            self.report_worker(rid)
+    def relay_log(self, message: str, style: str = "") -> None:
+        """Only the research screen shows pipeline chatter."""
+        sink = self.log_sink
+        if sink is not None and sink.is_mounted:
+            sink.write_detail(message, style)
 
     def action_cycle_theme(self) -> None:
         self.theme = "ansi-light" if self.theme == "ansi-dark" else "ansi-dark"
-        self.write_activity(f"theme: {self.theme}")
-
-    # Workers run the synchronous pipeline off the event loop. thread=True is
-    # required, not stylistic: pipeline.run_collection calls asyncio.run(), which
-    # raises if there is already a loop running on this thread.
-
-    @work(thread=True, exclusive=True)
-    def collect_worker(self, topic: str) -> None:
-        self.app.call_from_thread(self._begin, f"Collecting “{topic}”…")
-        try:
-            plan = pipeline.plan_for(topic, 180)
-            self.app.call_from_thread(
-                self.write_activity,
-                f"plan: {len(plan.subreddits)} subreddit(s), "
-                f"{len(plan.keywords)} keyword(s), {len(plan.brands)} brand(s)",
-            )
-            rid, n = pipeline.run_collection(topic, ["reddit", "web"], 180, 600, plan=plan)
-            self.app.call_from_thread(
-                self.write_activity, f"collected {n} document(s) into {rid}", "green"
-            )
-        except Exception as e:  # noqa: BLE001
-            self.app.call_from_thread(self.write_activity, f"collect failed: {e}", "red")
-        finally:
-            self.app.call_from_thread(self._end, "Collection finished")
-
-    @work(thread=True, exclusive=True)
-    def analyze_worker(self, run_id: str) -> None:
-        self.app.call_from_thread(self._begin, f"Analyzing {run_id}…")
-        try:
-            themes = pipeline.run_analysis(run_id)
-            self.app.call_from_thread(
-                self.write_activity, f"{len(themes)} theme(s) found", "green"
-            )
-        except Exception as e:  # noqa: BLE001
-            self.app.call_from_thread(self.write_activity, f"analyze failed: {e}", "red")
-        finally:
-            self.app.call_from_thread(self._end, "Analysis finished")
-
-    @work(thread=True, exclusive=True)
-    def demand_worker(self, run_id: str) -> None:
-        self.app.call_from_thread(self._begin, f"Harvesting demand for {run_id}…")
-
-        def progress(done: int, total: int, note: str) -> None:
-            if done % 10 == 0 or done == total:
-                self.app.call_from_thread(
-                    self.set_status, f"Harvesting {done}/{total} — {note}", True
-                )
-
-        try:
-            clusters = pipeline.run_demand(run_id, depth=1, progress=progress)
-            self.app.call_from_thread(
-                self.write_activity, f"{len(clusters)} search intent(s)", "green"
-            )
-        except Exception as e:  # noqa: BLE001
-            self.app.call_from_thread(self.write_activity, f"demand failed: {e}", "red")
-        finally:
-            self.app.call_from_thread(self._end, "Demand harvest finished")
-
-    @work(thread=True, exclusive=True)
-    def report_worker(self, run_id: str) -> None:
-        self.app.call_from_thread(self._begin, f"Rendering {run_id}…")
-        try:
-            from ideafindr.analyze.signals import language_bank, share_of_voice
-            from ideafindr.report.render import render
-
-            con = db.connect()
-            try:
-                run = db.get_run(con, run_id)
-                themes = db.load_themes(con, run_id)
-                docs = list(db.iter_documents(con, run_id))
-                clusters = db.load_demand_clusters(con, run_id)
-            finally:
-                con.close()
-            if not run or not themes:
-                raise ValueError("nothing to render -- analyze the run first")
-            md, html = render(
-                run=run, themes=themes, stats=corpus_stats(docs),
-                language=language_bank(docs),
-                sov=share_of_voice(docs, run.plan.brands),
-                summary="", demand=clusters,
-            )
-            self.app.call_from_thread(self.write_activity, f"wrote {md}", "green")
-            self.app.call_from_thread(self.write_activity, f"wrote {html}", "green")
-        except Exception as e:  # noqa: BLE001
-            self.app.call_from_thread(self.write_activity, f"report failed: {e}", "red")
-        finally:
-            self.app.call_from_thread(self._end, "Report finished")
-
-    def _begin(self, message: str) -> None:
-        self.busy = True
-        self.set_status(message, working=True)
-        self.write_activity(message)
-
-    def _end(self, message: str) -> None:
-        self.busy = False
-        self.set_status(message)
-        self.action_refresh()
 
 
 def run() -> None:
