@@ -339,3 +339,27 @@ def load_demand_clusters(con: sqlite3.Connection, run_id: str) -> list:
         "SELECT payload FROM demand_clusters WHERE run_id=? ORDER BY id", (run_id,)
     )
     return [DemandCluster.model_validate_json(r["payload"]) for r in rows]
+
+
+# --- deletion -----------------------------------------------------------------
+
+
+def delete_run(con: sqlite3.Connection, run_id: str) -> dict[str, int]:
+    """Remove a run and everything derived from it. Returns rows removed per table.
+
+    Every table that keys on run_id has to be listed here: a run left behind in
+    documents_fts but gone from documents would keep matching searches with no
+    document to show, and orphaned embeddings would be silently reused by the
+    bridge if the id were ever reissued.
+    """
+    counts: dict[str, int] = {}
+    for table in ("documents", "themes", "embeddings", "queries", "demand_clusters"):
+        counts[table] = con.execute(
+            f"DELETE FROM {table} WHERE run_id=?", (run_id,)
+        ).rowcount
+    counts["documents_fts"] = con.execute(
+        "DELETE FROM documents_fts WHERE run_id=?", (run_id,)
+    ).rowcount
+    counts["runs"] = con.execute("DELETE FROM runs WHERE id=?", (run_id,)).rowcount
+    con.commit()
+    return counts

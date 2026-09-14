@@ -26,12 +26,13 @@ callback through every collector.
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import datetime
 
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Center, Horizontal, Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     DataTable,
     Footer,
@@ -47,6 +48,7 @@ from textual.widgets import (
 
 from ideafindr import pipeline
 from ideafindr.analyze.signals import corpus_stats, language_bank, share_of_voice
+from ideafindr.config import settings
 from ideafindr.report.render import render
 from ideafindr.store import db
 
@@ -109,6 +111,62 @@ def _project_rows() -> list[tuple[str, str, str]]:
         con.close()
 
 
+class ConfirmScreen(ModalScreen[bool]):
+    """A yes/no question. Keys rather than buttons: fewer widgets, and the hands
+    are already on the keyboard."""
+
+    BINDINGS = [
+        ("y", "yes", "Yes"),
+        ("n", "no", "No"),
+        ("escape", "no", "Cancel"),
+    ]
+
+    CSS = """
+    ConfirmScreen { align: center middle; }
+    #box { width: 62; height: auto; padding: 1 2; border: round $foreground 50%;
+           background: $surface; }
+    #question { text-style: bold; margin-bottom: 1; }
+    #detail { color: $foreground 65%; margin-bottom: 1; }
+    #keys { color: $foreground 45%; }
+    """
+
+    def __init__(self, question: str, detail: str = "") -> None:
+        super().__init__()
+        self.question = question
+        self.detail = detail
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="box"):
+            yield Static(self.question, id="question")
+            if self.detail:
+                yield Static(self.detail, id="detail")
+            yield Static("y = yes    ·    n / esc = cancel", id="keys")
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
+    def action_no(self) -> None:
+        self.dismiss(False)
+
+
+def delete_project(run_id: str) -> str:
+    """Remove a project from the database and drop its rendered reports.
+
+    Returns a one-line summary of what went. Reports live outside the database,
+    so deleting only the rows would leave an orphaned directory whose report
+    cites documents that no longer exist.
+    """
+    con = db.connect()
+    try:
+        counts = db.delete_run(con, run_id)
+    finally:
+        con.close()
+    reports = settings.reports_dir / run_id
+    if reports.exists():
+        shutil.rmtree(reports, ignore_errors=True)
+    return f"deleted {counts['documents']} documents, {counts['themes']} themes"
+
+
 # --- home ---------------------------------------------------------------------
 
 
@@ -116,7 +174,14 @@ class HomeScreen(Screen):
     """A prompt and your past projects. Deliberately almost empty."""
 
     BINDINGS = [
-        ("escape", "clear", "Clear"),
+        # `down` from the topic box moves into the project list, which is what the
+        # hint promises. Without it the arrow keys just move the text cursor and
+        # the project list is unreachable -- as are every single-letter binding
+        # below, because an focused Input swallows plain keys.
+        ("down", "to_projects", "Projects"),
+        ("escape", "to_topic", "Back to topic"),
+        ("delete", "delete_project", "Delete"),
+        ("x", "delete_project", "Delete"),
         ("f5", "refresh", "Refresh"),
         ("ctrl+t", "cycle_theme", "Theme"),
         ("q", "quit", "Quit"),
@@ -146,8 +211,10 @@ class HomeScreen(Screen):
                 yield Static("IDEAFINDR", id="wordmark")
                 yield Static("what people say · what people search", id="tagline")
                 yield Input(placeholder="Research a topic…", id="topic")
-                yield Static("enter to research  ·  ↑↓ then enter to open a project",
-                             id="hint")
+                yield Static(
+                    "enter to research  ·  ↑↓ then enter to open  ·  x to delete",
+                    id="hint",
+                )
                 yield Label("Projects", id="projects-label")
                 yield ListView(id="projects")
         yield Footer()
@@ -175,8 +242,55 @@ class HomeScreen(Screen):
                 ListItem(Static(f"[b]{topic[:28]:<28}[/b] [dim]{meta}[/dim]"))
             )
 
-    def action_clear(self) -> None:
-        self.query_one("#topic", Input).value = ""
+    def action_to_projects(self) -> None:
+        """Move focus from the topic box into the project list."""
+        listing = self.query_one("#projects", ListView)
+        if not self.run_ids:
+            return
+        if self.query_one("#topic", Input).has_focus:
+            listing.focus()
+            if listing.index is None:
+                listing.index = 0
+        else:
+            listing.action_cursor_down()
+
+    def action_to_topic(self) -> None:
+        """Escape goes back to the topic box, clearing it if already there."""
+        topic = self.query_one("#topic", Input)
+        if topic.has_focus:
+            topic.value = ""
+        else:
+            topic.focus()
+
+    def action_delete_project(self) -> None:
+        """Delete the highlighted project, after confirming."""
+        listing = self.query_one("#projects", ListView)
+        idx = listing.index
+        if idx is None or not (0 <= idx < len(getattr(self, "run_ids", []))):
+            return
+        run_id = self.run_ids[idx]
+        con = db.connect()
+        try:
+            run = db.get_run(con, run_id)
+        finally:
+            con.close()
+        if not run:
+            return
+
+        def done(confirmed: bool | None) -> None:
+            if confirmed:
+                summary = delete_project(run_id)
+                self.action_refresh()
+                self.notify(f"Deleted “{run.topic}” — {summary}")
+
+        self.app.push_screen(
+            ConfirmScreen(
+                f"Delete “{run.topic}”?",
+                f"{run.doc_count} documents, its themes, its search demand and any "
+                f"rendered reports. This cannot be undone.",
+            ),
+            done,
+        )
 
     def action_cycle_theme(self) -> None:
         self.app.action_cycle_theme()

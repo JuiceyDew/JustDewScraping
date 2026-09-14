@@ -12,7 +12,14 @@ import pytest
 import ideafindr.config as cfg
 from ideafindr.models import RunPlan
 from ideafindr.store import db
-from ideafindr.tui.app import HomeScreen, IdeafindrApp, ProjectScreen, ResearchScreen
+from ideafindr.tui.app import (
+    ConfirmScreen,
+    HomeScreen,
+    IdeafindrApp,
+    ProjectScreen,
+    ResearchScreen,
+    delete_project,
+)
 from tests.conftest import make_doc
 
 
@@ -72,6 +79,23 @@ async def test_typing_a_topic_starts_research(seeded):
         await pilot.pause()
         assert isinstance(app.screen, ResearchScreen)
         assert started == ["sauna tents"]
+
+
+async def test_arrow_down_reaches_the_project_list(seeded):
+    """The hint says "↑↓ then enter to open a project". A focused Input swallows
+    the arrows, so without an explicit binding the list is unreachable -- and so
+    is every single-letter key, including delete."""
+    app = IdeafindrApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        home = app.screen
+        assert home.query_one("#topic").has_focus
+        await pilot.press("down")
+        await pilot.pause()
+        assert home.query_one("#projects").has_focus
+        await pilot.press("escape")
+        await pilot.pause()
+        assert home.query_one("#topic").has_focus, "escape returns to the prompt"
 
 
 async def test_slash_commands_are_not_treated_as_topics(seeded):
@@ -241,3 +265,67 @@ async def test_uses_the_terminals_own_palette(seeded):
         assert app.theme == "ansi-dark"
         app.action_cycle_theme()
         assert app.theme == "ansi-light"
+
+
+# --- deleting -----------------------------------------------------------------
+
+
+async def test_delete_asks_before_removing_anything(seeded):
+    """Deletion is irreversible, so it must never happen on a single keystroke."""
+    app = IdeafindrApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        home = app.screen
+        await pilot.press("down")           # focus moves into the project list
+        home.query_one("#projects").index = home.run_ids.index("run-a")
+        await pilot.press("x")
+        await pilot.pause()
+
+        assert isinstance(app.screen, ConfirmScreen)
+        await pilot.press("escape")
+        await pilot.pause()
+
+        con = db.connect()
+        try:
+            assert db.get_run(con, "run-a") is not None, "cancelling must keep the run"
+        finally:
+            con.close()
+
+
+async def test_confirming_removes_the_project_and_leaves_the_others(seeded):
+    app = IdeafindrApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        home = app.screen
+        await pilot.press("down")
+        home.query_one("#projects").index = home.run_ids.index("run-a")
+        await pilot.press("x")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        con = db.connect()
+        try:
+            assert db.get_run(con, "run-a") is None
+            assert db.get_run(con, "run-b") is not None, "only the chosen run goes"
+            assert db.search_fts(con, "run-a", "chiller") == []
+            assert db.search_fts(con, "run-b", "sauna") != [], "survivor stays searchable"
+        finally:
+            con.close()
+        assert set(app.screen.run_ids) == {"run-b"}, "the list should refresh"
+
+
+def test_delete_project_also_removes_rendered_reports(seeded, monkeypatch):
+    """Reports live outside the database; leaving them orphans a report citing
+    documents that no longer exist."""
+    import ideafindr.config as cfg
+
+    reports = seeded / "reports"
+    monkeypatch.setattr(cfg.settings, "reports_dir", reports)
+    (reports / "run-a").mkdir(parents=True)
+    (reports / "run-a" / "report.md").write_text("# stale")
+    (reports / "run-b").mkdir(parents=True)
+
+    delete_project("run-a")
+    assert not (reports / "run-a").exists()
+    assert (reports / "run-b").exists(), "another project's reports must survive"

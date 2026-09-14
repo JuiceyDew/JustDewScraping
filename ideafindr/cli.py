@@ -327,6 +327,30 @@ def bridge(verbose: bool = typer.Option(False, "-v")) -> None:
 
 
 @app.command()
+def delete(
+    run_id: str = typer.Argument(..., help="The run to delete."),
+    yes: bool = typer.Option(False, "-y", help="Skip the confirmation."),
+) -> None:
+    """Delete a run: its documents, themes, search demand and rendered reports."""
+    settings.ensure_dirs()
+    con = db.connect()
+    try:
+        run = db.get_run(con, run_id)
+    finally:
+        con.close()
+    if not run:
+        console.print(f"[red]Unknown run:[/] {run_id}")
+        raise typer.Exit(1)
+    console.print(f"[bold]{run.topic}[/]  ·  {run.doc_count} documents  ·  {run_id}")
+    if not yes and not typer.confirm("Delete this run? It cannot be undone.", default=False):
+        raise typer.Abort()
+
+    from ideafindr.tui.app import delete_project
+
+    console.print(f"[green]Deleted.[/] {delete_project(run_id)}")
+
+
+@app.command()
 def tui() -> None:
     """Open the interactive terminal UI (same as running `ideafindr` bare)."""
     settings.ensure_dirs()

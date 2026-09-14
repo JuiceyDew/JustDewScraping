@@ -165,12 +165,17 @@ Three screens, each doing one thing.
    ┌────────────────────────────────────────────────────┐
    │ Research a topic…                                  │
    └────────────────────────────────────────────────────┘
-        enter to research · ↑↓ then enter to open a project
+    enter to research · ↑↓ then enter to open · x to delete
 
    Projects
     cold plunge tubs    716 docs · 19 themes · 12 intents · Sep 13
     cold plunge tubs    673 docs · 18 themes · Sep 12
 ```
+
+`↓` from the prompt moves into the project list, `esc` goes back. `x` (or
+`delete`) removes the highlighted project after confirming — its documents,
+themes, search demand and rendered reports. There is a `ideafindr delete <run>`
+subcommand for the same thing.
 
 Typing a topic runs the whole pipeline — plan, collect, cluster, harvest search
 demand, write the report — on a **Research** screen that shows each stage as it
