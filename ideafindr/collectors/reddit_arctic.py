@@ -23,6 +23,16 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ideafindr.collectors.base import AsyncRateLimiter
+from ideafindr.collectors.reddit_common import (
+    SWEEP_MAX_SUBSCRIBERS,
+    TOO_BIG,
+    comment_to_doc,
+    is_bot,
+    is_on_topic,
+    post_to_doc,
+    topic_terms,
+    topic_words,
+)
 from ideafindr.config import settings
 from ideafindr.models import Document, RunPlan
 
@@ -105,118 +115,7 @@ class ArcticClient:
         return []
 
 
-# --- normalisation ------------------------------------------------------------
-
-
-def _ts(v: Any) -> datetime:
-    return datetime.fromtimestamp(float(v or 0), tz=timezone.utc)
-
-
-def _permalink(raw: dict) -> str:
-    pl = raw.get("permalink") or ""
-    if pl.startswith("/"):
-        return f"https://www.reddit.com{pl}"
-    return pl or raw.get("url") or ""
-
-
-def post_to_doc(raw: dict) -> Document | None:
-    pid = raw.get("id")
-    if not pid:
-        return None
-    return Document(
-        id=f"reddit:{pid}",
-        platform="reddit",
-        kind="post",
-        url=_permalink(raw),
-        title=raw.get("title"),
-        text=raw.get("selftext") or "",
-        author=raw.get("author"),
-        created_at=_ts(raw.get("created_utc")),
-        parent_id=None,
-        community=raw.get("subreddit"),
-        engagement={
-            "score": raw.get("score") or 0,
-            "num_comments": raw.get("num_comments") or 0,
-            "upvote_ratio": raw.get("upvote_ratio"),
-        },
-        raw=raw,
-    )
-
-
-# Moderator bots post identical boilerplate under thousands of threads. Left in,
-# they form their own large "theme" and poison the language bank.
-_BOT_AUTHORS = {"automoderator", "[deleted]", "amputatorbot", "remindmebot", "sneakpeekbot"}
-_BOT_PHRASES = ("i am a bot", "this action was performed automatically", "beep boop")
-
-
-def is_bot(author: str | None, text: str) -> bool:
-    a = (author or "").lower()
-    if a in _BOT_AUTHORS or a.endswith("bot") or a.endswith("-bot"):
-        return True
-    low = text.lower()
-    return any(p in low for p in _BOT_PHRASES)
-
-
-def comment_to_doc(raw: dict) -> Document | None:
-    cid = raw.get("id")
-    if not cid:
-        return None
-    link_id = (raw.get("link_id") or "").removeprefix("t3_")
-    body = raw.get("body") or ""
-    if body in ("[deleted]", "[removed]", ""):
-        return None
-    if is_bot(raw.get("author"), body):
-        return None
-    return Document(
-        id=f"reddit:{cid}",
-        platform="reddit",
-        kind="comment",
-        url=_permalink(raw),
-        title=None,
-        text=body,
-        author=raw.get("author"),
-        created_at=_ts(raw.get("created_utc")),
-        parent_id=f"reddit:{link_id}" if link_id else None,
-        community=raw.get("subreddit"),
-        engagement={"score": raw.get("score") or 0},
-        raw=raw,
-    )
-
-
 # --- collector ----------------------------------------------------------------
-
-# Keyword search is unsupported on very high-traffic subreddits; skip them and
-# rely on smaller, topic-native communities where the signal is better anyway.
-_TOO_BIG = 3_000_000
-# Above this, a keyword-less sweep returns generic front-page content, not topic
-# discussion. Determined by watching r/Biohackers (~1M) flood a cold-plunge corpus
-# with 534 off-topic posts about boron, peptides and green powders.
-_SWEEP_MAX_SUBSCRIBERS = 250_000
-
-_TOPIC_STOP = {"the", "and", "for", "with", "best", "top", "new", "how", "why", "what"}
-
-
-def topic_terms(plan: RunPlan) -> set[str]:
-    """Distinctive words that mark a document as being about THIS topic.
-
-    Built from the topic phrase and brand names only -- deliberately not from
-    `keywords`, which legitimately include generic words like "water" or
-    "worth it" that match anything.
-    """
-    terms: set[str] = set()
-    for src in [plan.topic, *plan.brands]:
-        for w in re.findall(r"[a-z]{3,}", src.lower()):
-            if w not in _TOPIC_STOP:
-                terms.add(w)
-                terms.add(w.rstrip("s"))  # crude singular
-    return terms
-
-
-def is_on_topic(doc: Document, terms: set[str]) -> bool:
-    if not terms:
-        return True
-    words = set(re.findall(r"[a-z]{3,}", doc.searchable_text.lower()))
-    return bool(terms & (words | {w.rstrip("s") for w in words}))
 
 
 class RedditArcticCollector:
@@ -240,7 +139,7 @@ class RedditArcticCollector:
         scored on how many topic terms appear in the name and description, and
         anything matching only one generic word is dropped.
         """
-        words = [w for w in re.findall(r"[a-z]{3,}", plan.topic.lower()) if w not in _TOPIC_STOP]
+        words = topic_words(plan.topic)
         if not words:
             return []
         terms = set(words) | {w.rstrip("s") for w in words}
@@ -263,8 +162,8 @@ class RedditArcticCollector:
                 name = h.get("display_name")
                 subs = int(h.get("subscribers") or 0)
                 # Floor drops dead 3-member subs; ceiling keeps the keyword-less
-                # sweep meaningful (see _SWEEP_MAX_SUBSCRIBERS).
-                if not name or not (200 <= subs <= _SWEEP_MAX_SUBSCRIBERS):
+                # sweep meaningful (see SWEEP_MAX_SUBSCRIBERS).
+                if not name or not (200 <= subs <= SWEEP_MAX_SUBSCRIBERS):
                     continue
                 haystack = f"{name} {h.get('public_description') or ''} {h.get('title') or ''}".lower()
                 hay_words = set(re.findall(r"[a-z]{3,}", haystack))
@@ -306,7 +205,7 @@ class RedditArcticCollector:
                 if dn.lower() != n.lower():
                     continue
                 subs = h.get("subscribers") or 0
-                if subs > _TOO_BIG:
+                if subs > TOO_BIG:
                     log.info("skipping r/%s: %s subscribers, too big to keyword-search", dn, subs)
                     break
                 resolved.append((dn, int(subs)))
@@ -415,7 +314,7 @@ class RedditArcticCollector:
                 # off-topic noise. Only sweep communities small enough to be
                 # topic-native.
                 keywords: list[str | None] = list(plan.keywords[:6])
-                if subscribers <= _SWEEP_MAX_SUBSCRIBERS:
+                if subscribers <= SWEEP_MAX_SUBSCRIBERS:
                     keywords.append(None)
                 elif not keywords:
                     log.warning("r/%s is large and no keywords given; skipping", sub)
@@ -427,7 +326,7 @@ class RedditArcticCollector:
                 # topic-native subs are exempt: everything there is on-topic by
                 # construction, and their posts often omit the topic word entirely
                 # ("Washing filters? Who else does it?").
-                gate = subscribers > _SWEEP_MAX_SUBSCRIBERS
+                gate = subscribers > SWEEP_MAX_SUBSCRIBERS
                 for kw in keywords:
                     try:
                         found = await self.search_posts(cl, sub, kw, a, b, per_slice)

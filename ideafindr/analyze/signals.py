@@ -20,7 +20,7 @@ from ideafindr.models import Document, Theme
 # volume, themes and the language bank -- they just cannot carry a date, so they
 # must be kept out of every time-series calculation. Left in, they all land in
 # the current week and inflate the recent share of whatever theme they join.
-UNDATED_PLATFORMS = {"web"}
+UNDATED_PLATFORMS = {"web", "reddit-search"}
 
 
 def timed(docs: list[Document]) -> list[Document]:

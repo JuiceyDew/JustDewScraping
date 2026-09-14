@@ -54,8 +54,24 @@ class Settings(BaseSettings):
     ollama_local_url: str = "http://localhost:11434"
 
     # --- sources --------------------------------------------------------------
+    # Reddit's own API: 100 queries/min with OAuth, versus Arctic Shift's ~2/s
+    # that already times out on a fifth of keyword queries. Create a free app at
+    # https://reddit.com/prefs/apps (type: script) -- read-only needs only the id
+    # and secret, no Reddit password.
+    #
+    # LICENSING: the free tier is NON-COMMERCIAL (personal, research, bots).
+    # Selling reports built on this data needs Reddit's approval and is billed
+    # per call. Nothing in the code can detect that line being crossed.
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    # Reddit rejects generic user-agents; it should name the app and its author.
+    reddit_user_agent: str = "linux:ideafindr:0.1 (research; by /u/ideafindr)"
+
     arctic_base: str = "https://arctic-shift.photon-reddit.com"
     arctic_rps: float = 2.0  # be a good citizen: it's one person's free service
+    # Stack Exchange allows 300 requests/day/IP unkeyed, 10k with a free key
+    # from stackapps.com. Empty is fine; the collector budgets accordingly.
+    stackexchange_key: str = ""
     enable_tiktok: bool = False
     enable_instagram: bool = False
     tiktok_ms_token: str = ""

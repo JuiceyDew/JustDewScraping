@@ -26,7 +26,8 @@ from ideafindr.store import db
 
 log = logging.getLogger(__name__)
 
-ALL_SOURCES = ["reddit", "web", "tiktok", "instagram"]
+ALL_SOURCES = ["reddit", "web", "dork", "hackernews", "lemmy",
+               "stackexchange", "tiktok", "instagram"]
 
 
 def make_run_id(topic: str) -> str:
@@ -47,9 +48,37 @@ def build_collectors(sources: list[str]) -> list:
     an ImportError must not break a run that doesn't use them."""
     out: list = []
     if "reddit" in sources:
-        out.append(RedditArcticCollector())
+        # Reddit's own API when credentials exist, Arctic Shift otherwise. Arctic
+        # Shift is a free archive run by one person and times out on roughly a
+        # fifth of keyword queries; the official API does not, and allows 100
+        # queries/min instead of 2/s.
+        if settings.reddit_client_id and settings.reddit_client_secret:
+            from ideafindr.collectors.reddit_api import RedditAPICollector
+
+            log.info("reddit: using the official API (credentials found)")
+            out.append(RedditAPICollector())
+        else:
+            log.info("reddit: using Arctic Shift (no REDDIT_CLIENT_ID set); expect "
+                     "some keyword queries to time out")
+            out.append(RedditArcticCollector())
     if "web" in sources:
         out.append(WebCollector())
+    if "dork" in sources:
+        from ideafindr.collectors.dork import DorkCollector
+
+        out.append(DorkCollector())
+    if "hackernews" in sources:
+        from ideafindr.collectors.hackernews import HackerNewsCollector
+
+        out.append(HackerNewsCollector())
+    if "lemmy" in sources:
+        from ideafindr.collectors.lemmy import LemmyCollector
+
+        out.append(LemmyCollector())
+    if "stackexchange" in sources:
+        from ideafindr.collectors.stackexchange import StackExchangeCollector
+
+        out.append(StackExchangeCollector())
     if "tiktok" in sources and settings.enable_tiktok:
         try:
             from ideafindr.collectors.tiktok import TikTokCollector

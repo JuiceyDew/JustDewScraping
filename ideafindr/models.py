@@ -12,7 +12,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-Platform = Literal["reddit", "web", "tiktok", "instagram", "x"]
+# "reddit-search" is a Reddit thread found via a search engine: a permalink and a
+# snippet, with no reliable date. It is kept distinct from "reddit" so the time
+# series can exclude it -- see analyze/signals.UNDATED_PLATFORMS.
+Platform = Literal[
+    "reddit", "reddit-search", "web", "hackernews", "lemmy", "stackexchange",
+    "tiktok", "instagram", "x",
+]
 Kind = Literal["post", "comment", "article", "video", "caption"]
 Stance = Literal["pain_point", "desire", "objection", "praise", "question", "neutral"]
 
@@ -70,6 +76,9 @@ class RunPlan(BaseModel):
     hashtags: list[str] = Field(default_factory=list)
     brands: list[str] = Field(default_factory=list)
     web_queries: list[str] = Field(default_factory=list)
+    # Stack Exchange sites worth searching, e.g. ["diy", "physics"]. Empty for
+    # most consumer topics, which is why the collector skips rather than guesses.
+    stack_sites: list[str] = Field(default_factory=list)
     days: int = 180
 
     def summary(self) -> str:

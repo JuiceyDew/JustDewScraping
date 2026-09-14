@@ -40,7 +40,12 @@ topic → plan (LLM) → collect → SQLite+FTS → cluster → label (LLM) → 
 
 | Upstream tool | Where it's used |
 |---|---|
-| `arctic_shift` | `collectors/reddit_arctic.py` — Reddit posts, comments, trends |
+| Reddit API | `collectors/reddit_api.py` — 100 queries/min, used when credentials exist |
+| `arctic_shift` | `collectors/reddit_arctic.py` — free Reddit archive, the fallback |
+| DDG dorking | `collectors/dork.py` — `site:reddit.com` snippets, never touches Reddit |
+| HN (Algolia) | `collectors/hackernews.py` — free, no key, technical skew |
+| Lemmy | `collectors/lemmy.py` — federated, free; tech topics only in practice |
+| Stack Exchange | `collectors/stackexchange.py` — free, 300/day, planner picks the sites |
 | `gpt-researcher` | `engines/researcher.py` — wired and tested, but needs an embeddings API (see Setup) |
 | `deep-searcher` | `engines/searcher.py` — same; `ideafindr ask` |
 | `TikTok-Api` | `collectors/tiktok.py` — optional, off by default |

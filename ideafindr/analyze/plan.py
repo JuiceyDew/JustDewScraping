@@ -37,6 +37,10 @@ Return JSON with these fields:
 - "hashtags": 5-8 hashtags without the "#", for TikTok/Instagram if enabled.
 - "web_queries": 4-6 open-web search queries likely to surface honest discussion
   (reviews, forum threads, "worth it", "problems with", comparisons).
+- "stack_sites": 0-3 Stack Exchange site slugs where this topic is genuinely
+  discussed, e.g. ["diy"], ["homeimprovement"], ["physics"], ["cooking"]. Use the
+  slug only, no domain. MOST TOPICS HAVE NONE -- return an empty list rather than
+  a loose fit. A consumer product with no technical community gets [].
 
 Be concrete. Generic terms produce a useless corpus."""
 
