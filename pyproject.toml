@@ -1,0 +1,68 @@
+[project]
+name = "ideafindr"
+version = "0.1.0"
+description = "Social listening + deep research pipeline: find out what people are actually saying about any topic."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # core
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    "tenacity>=9.0",
+    "typer>=0.15",
+    "rich>=13.9",
+    "python-dotenv>=1.0",
+    "jinja2>=3.1",
+    # llm (openai-compatible -> ollama cloud)
+    "openai>=1.60",
+    # embeddings: see ideafindr/embed.py -- backend chosen at runtime (musl constraint)
+    # clustering
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    # bridge
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    # web collector
+    "ddgs>=9.0",
+    "trafilatura>=2.0",
+]
+
+[project.optional-dependencies]
+# Heavy / fast-moving research engines. Installed separately so a broken upstream
+# release can never block the core pipeline.
+engines = [
+    # Pinned below 0.16: 0.16.0 ships a NameError on import
+    # (gpt_researcher/actions/query_processing.py uses `Any`/`List` without
+    # importing them). Re-test the custom-retriever contract before widening this.
+    "gpt-researcher>=0.15.1,<0.16",
+    "deepsearcher>=0.0.2",
+    # deepsearcher eagerly imports every web crawler, including the Firecrawl one,
+    # which does `from firecrawl import ScrapeOptions`. firecrawl-py 3.x renamed
+    # that to V1ScrapeOptions, so anything >=3 makes deepsearcher unimportable.
+    # We never call Firecrawl -- this pin exists purely to keep the import working.
+    "firecrawl-py<3",
+]
+# Unofficial scrapers. ToS-risky, break often, disabled by default. See README.
+scrapers = [
+    "TikTokApi>=7.1",
+    "instaloader>=4.14",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.22",
+]
+
+[project.scripts]
+ideafindr = "ideafindr.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ideafindr"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

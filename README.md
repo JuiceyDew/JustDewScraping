@@ -1,0 +1,217 @@
+# Ideafindr
+
+Find out what people are **actually saying** about any topic, and turn it into a
+report a marketing team can act on.
+
+Combines a social-data collection layer (Reddit via Arctic Shift, open web,
+optionally TikTok and Instagram) with a quantitative analysis layer (theme
+clustering, momentum, share of voice, language bank) and
+[gpt-researcher](https://github.com/assafelovic/gpt-researcher) /
+[deep-searcher](https://github.com/zilliztech/deep-searcher) for written
+synthesis. All LLM calls go to **Ollama Cloud**.
+
+```
+ideafindr research "cold plunge tubs"
+```
+
+---
+
+## How the pieces fit
+
+The upstream tools don't compose directly: collectors emit platform-specific
+JSON, while research agents expect *a search engine*. The keystone is a small
+**bridge** — a local HTTP endpoint that serves our scraped corpus in the exact
+shape gpt-researcher's `RETRIEVER=custom` expects:
+
+```json
+[{"url": "https://reddit.com/...", "raw_content": "post + top comments"}]
+```
+
+That tiny contract means gpt-researcher's whole agent loop — query planning,
+source curation, citation, report writing — runs over scraped social data with
+**no fork of the upstream repo**.
+
+```
+topic → plan (LLM) → collect → SQLite+FTS → cluster → label (LLM) → signals → report
+                                     │
+                                     └→ bridge (/retrieve) → gpt-researcher → summary
+                                     └→ export → deep-searcher → follow-up Q&A
+```
+
+| Upstream tool | Where it's used |
+|---|---|
+| `arctic_shift` | `collectors/reddit_arctic.py` — Reddit posts, comments, trends |
+| `gpt-researcher` | `engines/researcher.py` — wired and tested, but needs an embeddings API (see Setup) |
+| `deep-searcher` | `engines/searcher.py` — same; `ideafindr ask` |
+| `TikTok-Api` | `collectors/tiktok.py` — optional, off by default |
+| `instaloader` | `collectors/instagram.py` — optional, off by default |
+
+**Not included, deliberately.** `stanford-oval/storm` and `dzhng/deep-research`
+run the same plan→search→synthesize loop as gpt-researcher; running three of
+them is duplicated work for one report section. `xdevplatform/xurl` is deferred
+because meaningful X search needs a paid API tier — the `Collector` protocol in
+`collectors/base.py` is where it drops in when that budget exists.
+
+---
+
+## Setup
+
+```bash
+uv sync                      # everything you need
+uv sync --extra scrapers     # + TikTok and Instagram (read the warning below)
+
+cp .env.example .env         # then add your Ollama Cloud key
+uv run python scripts/preflight.py
+```
+
+`preflight.py` probes every external dependency and prints a pass/fail line per
+endpoint. **Run it first** — it answers questions that change how the pipeline
+behaves, in particular whether your Ollama Cloud key authorises embeddings.
+
+### Embeddings
+
+This stack is **cloud-only**: every LLM call goes to Ollama Cloud, and nothing
+runs locally except the pipeline itself.
+
+**Ollama Cloud serves no embeddings.** `/v1/embeddings` returns
+`404 path not found` and `/api/embed` returns `401 unauthorized` for cloud keys
+(verified 2026-09-12). Chat works fine.
+
+So clustering uses **TF-IDF + SVD** — pure scikit-learn, in-process, instant, no
+API key, no daemon, no container. It is a real implementation, not a stub: it
+clusters short social posts well enough to produce usable themes. Its weakness is
+paraphrase — it cannot tell that "my chiller is deafening" and "the compressor
+keeps the neighbours up" are the same complaint, because they share no words.
+
+**What this costs you:** `report --engine gpt-researcher` and `ask` do not work.
+Both build their own vector stores and require an embeddings API; neither can use
+an in-process embedder. They fail with an explicit message saying so. Everything
+else — `plan`, `collect`, `analyze`, `report`, `runs` — is unaffected, and the
+report keeps all its sections except the LLM-written executive summary.
+
+**To enable those two commands later**, add any provider that actually serves
+embeddings (Jina and Voyage have free tiers with OpenAI-compatible endpoints;
+OpenAI, Cohere and Together also work) and point `EMBED_BACKEND` at it. The
+backend chain in `ideafindr/embed.py` is the only place that needs to change, and
+`EMBED_BACKEND=auto` will pick up an Ollama Cloud embeddings endpoint
+automatically if one ever ships.
+
+### Models
+
+Ollama Cloud lists model IDs **without** a `-cloud` suffix on the `/v1`
+endpoint. See the live list with `ideafindr doctor`.
+
+Both `FAST_MODEL` and `SMART_MODEL` default to **`gpt-oss:120b`**, and the second
+one is deliberate. Several models on this endpoint are reasoning models that emit
+a `reasoning` field before any `content` and can burn the entire `max_tokens`
+budget doing it — returning HTTP 200 with an **empty message**. Downstream that
+surfaces as `NoneType has no len()` from inside gpt-researcher, which tells you
+nothing about the cause.
+
+Measured on a 600-word request at `max_tokens=2000`:
+
+| model | time | content | finish | reasoning |
+|---|---|---|---|---|
+| `gpt-oss:120b` | 6.2s | 7020 chars | stop | 443 chars |
+| `deepseek-v4-pro:0813` | 14.3s | 5546 chars | stop | 1433 chars |
+| `minimax-m3` | 6.5s | 4271 chars | stop | 1054 chars |
+| `qwen3.5:397b` | 25.2s | 4476 chars | stop | 4332 chars |
+| `mistral-large-3:675b` | 29.3s | 8427 chars | **length** (truncated) | 0 |
+| `glm-5.3` | 32.5s | **0 chars** | length | 9541 chars |
+| `kimi-k3` | — | **0 chars** | — | — |
+
+`ideafindr.llm.chat()` raises `EmptyCompletion` naming the model, the
+`finish_reason` and the reasoning length rather than passing an empty string
+along, so if you switch models you find out immediately.
+
+> **Note for musl systems (Alpine, Chimera).** `fastembed` and
+> `sentence-transformers` are *not installable* — `onnxruntime` and PyTorch ship
+> glibc-only wheels. That's why the fallback chain exists and why TF-IDF is a
+> real implementation rather than a stub. It clusters short social posts
+> decently; it's weaker at grouping posts that mean the same thing in different
+> words, which the LLM labelling step partly compensates for.
+
+---
+
+## Commands
+
+```bash
+ideafindr plan    "topic"                 # show the collection plan, collect nothing
+ideafindr collect "topic" --days 180      # build a corpus
+ideafindr analyze [run]  [-k 15]          # cluster → label → quotes → signals
+ideafindr research "topic"                # all of the above, end to end
+ideafindr runs                            # list past runs
+ideafindr bridge                          # run the retriever endpoint standalone
+ideafindr doctor                          # re-run the preflight probes
+
+# needs an embeddings provider (see Setup) -- not available cloud-only:
+#   ideafindr report [run] --engine gpt-researcher
+#   ideafindr ask "question" --run <run>
+```
+
+Reports land in `data/reports/<run>/` as `report.md` and a self-contained
+`report.html` (inline CSS and SVG, no CDN — it survives being emailed and opened
+from disk).
+
+---
+
+## What's in a report
+
+1. **Theme map** — themes ranked by volume × momentum, with trend sparklines
+3. **Voice of the customer** — verbatim quotes, never paraphrased, each with a
+   live permalink
+4. **Language bank** — the words and phrases people actually use, for ad copy
+5. **Share of voice** — brand mentions and their trend
+6. **Methodology** — sources, counts, date range, and the caveats below
+
+**Momentum** is a theme's share of the last 30 days divided by its share of the
+whole window. `>1` means rising faster than the topic overall. It's deliberately
+a *share* rather than raw recent volume, which would just track how much got
+collected.
+
+---
+
+## Things worth knowing before you sell this to a client
+
+- **Reddit skews the picture.** Younger, more male, more English-speaking, more
+  technical than the general market. The report says so in its methodology
+  section; leave that in.
+- **Arctic Shift is one person's free service** with no uptime guarantee. The
+  client is polite by default (~2 req/s, backoff on 429). Don't raise
+  `ARCTIC_RPS`. If it becomes load-bearing, move to the bulk `.zst` dumps.
+- **Web articles carry their collection date, not publication date** —
+  trafilatura's date extraction is unreliable often enough that trusting it
+  would corrupt the trend charts. Web docs feed themes and quotes but not
+  time-series signals.
+- **TikTok and Instagram scraping violates those platforms' Terms of Service.**
+  For a company selling research to clients that's commercial and legal
+  exposure, not just a technical risk. Both are off by default and every failure
+  is swallowed so a dead scraper degrades the corpus instead of killing the run.
+  Worth a legal read before anything ships to a client.
+  - Instagram specifically is close to non-viable at volume: hashtag browsing is
+    login-gated and anonymous requests hit HTTP 429 within a handful of calls.
+    The default `websearch` mode finds public post URLs via search instead, which
+    yields less but doesn't get accounts banned.
+- **gpt-researcher is a fast-moving dependency.** It's pinned. If a report comes
+  back citing only web sources, check that `RETRIEVER_ENDPOINT` is still the env
+  var name upstream reads — that's the contract that can break silently.
+
+---
+
+## Development
+
+```bash
+uv run pytest                # offline: collector tests use recorded HTTP
+uv run ideafindr doctor      # live: probes Arctic Shift and Ollama Cloud
+```
+
+Tests never hit Arctic Shift. They pin the live-API behaviours that actually
+broke things during development:
+
+- a `200` response carrying `"data": null` — throttling, must be retried, not
+  read as empty
+- `"Timeout. Maybe slow down a bit"` — the query was too expensive, so the fix
+  is a smaller page, not a longer wait
+- server-side full-text search failing while plain listing succeeds — the slice
+  is recovered by fetching unfiltered and matching the keyword locally, because
+  shrinking the page can't help when the cost is the text search itself
