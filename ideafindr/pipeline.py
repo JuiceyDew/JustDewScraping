@@ -94,6 +94,63 @@ def run_collection(topic: str, sources: list[str], days: int, limit: int, plan: 
         con.close()
 
 
+def run_demand(
+    run_id: str,
+    topic: str | None = None,
+    depth: int = 2,
+    label: bool = True,
+    reuse: bool = False,
+    progress=None,
+) -> list:
+    """Harvest the query space for a run's topic, cluster it, and join it to the
+    conversation themes already stored for that run.
+
+    Safe to run on a run that has never been analysed: coverage simply comes back
+    zero everywhere, and every gap collapses to the same value.
+    """
+    from ideafindr.demand import analyze as danalyze
+    from ideafindr.demand import gap as dgap
+    from ideafindr.demand.harvest import harvest
+
+    con = db.connect()
+    try:
+        run = db.get_run(con, run_id)
+        if not run and topic is None:
+            raise ValueError(f"unknown run: {run_id}")
+        subject = topic or (run.topic if run else "")
+
+        if reuse:
+            queries = db.load_queries(con, run_id)
+            log.info("reusing %d stored query observations", len(queries))
+        else:
+            queries = asyncio.run(harvest(subject, depth=depth, progress=progress))
+        if not queries:
+            log.warning("no queries harvested for %r", subject)
+            return []
+        if not reuse:
+            stored = db.save_queries(con, run_id, queries)
+            log.info("stored %d query observations", stored)
+
+        clusters = danalyze.cluster_queries(queries)
+        if label and settings.ollama_api_key:
+            clusters = danalyze.label_clusters(clusters, subject)
+        elif label:
+            log.warning("no LLM key configured; demand clusters keep keyword labels")
+            for c in clusters:
+                c.label = ", ".join(c.keywords[:4]) or c.label
+
+        themes = db.load_themes(con, run_id)
+        if themes:
+            clusters = dgap.attach_coverage(clusters, run_id, themes, subject, con=con)
+        else:
+            log.warning("run %s has no themes; gaps will not reflect coverage", run_id)
+        clusters = dgap.compute_gaps(clusters)
+        db.save_demand_clusters(con, run_id, clusters)
+        return clusters
+    finally:
+        con.close()
+
+
 def run_analysis(run_id: str, n_clusters: int | None = None, label: bool = True) -> list[Theme]:
     con = db.connect()
     try:

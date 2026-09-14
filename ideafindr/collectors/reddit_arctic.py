@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
+from ideafindr.collectors.base import AsyncRateLimiter
 from ideafindr.config import settings
 from ideafindr.models import Document, RunPlan
 
@@ -37,9 +38,7 @@ class ArcticClient:
 
     def __init__(self, base: str | None = None, rps: float | None = None):
         self.base = (base or settings.arctic_base).rstrip("/")
-        self._min_interval = 1.0 / (rps or settings.arctic_rps)
-        self._last = 0.0
-        self._lock = asyncio.Lock()
+        self._limiter = AsyncRateLimiter(rps or settings.arctic_rps)
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(60.0), headers={"User-Agent": "ideafindr/0.1 (research)"}
         )
@@ -49,14 +48,6 @@ class ArcticClient:
 
     async def __aexit__(self, *exc: Any) -> None:
         await self._client.aclose()
-
-    async def _throttle(self) -> None:
-        async with self._lock:
-            now = asyncio.get_event_loop().time()
-            wait = self._min_interval - (now - self._last)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._last = asyncio.get_event_loop().time()
 
     @retry(
         retry=retry_if_exception_type(ArcticTransient),
@@ -68,7 +59,7 @@ class ArcticClient:
         """One request. Returns None when the backend timed out on the query
         itself (as opposed to being busy), which the caller answers by asking for
         a smaller page rather than by waiting."""
-        await self._throttle()
+        await self._limiter.wait()
         r = await self._client.get(f"{self.base}{path}", params=params)
 
         if r.status_code == 429 or r.status_code >= 500:

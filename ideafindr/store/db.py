@@ -55,6 +55,24 @@ CREATE TABLE IF NOT EXISTS themes (
     PRIMARY KEY (run_id, id)
 );
 
+CREATE TABLE IF NOT EXISTS queries (
+    run_id      TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    source      TEXT NOT NULL,
+    seed        TEXT NOT NULL,
+    depth       INTEGER NOT NULL DEFAULT 1,
+    rank        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (run_id, text, source, seed)
+);
+CREATE INDEX IF NOT EXISTS ix_queries_run ON queries(run_id);
+
+CREATE TABLE IF NOT EXISTS demand_clusters (
+    run_id      TEXT NOT NULL,
+    id          INTEGER NOT NULL,
+    payload     TEXT NOT NULL,
+    PRIMARY KEY (run_id, id)
+);
+
 CREATE TABLE IF NOT EXISTS embeddings (
     run_id      TEXT NOT NULL,
     doc_id      TEXT NOT NULL,
@@ -176,13 +194,22 @@ def get_documents(con: sqlite3.Connection, run_id: str, doc_ids: list[str]) -> l
     return out
 
 
-def search_fts(con: sqlite3.Connection, run_id: str, query: str, limit: int = 50) -> list[str]:
-    """Keyword arm of the bridge's hybrid retrieval. Returns doc_ids, best first."""
+def search_fts(
+    con: sqlite3.Connection, run_id: str, query: str, limit: int = 50, op: str = "OR"
+) -> list[str]:
+    """Keyword arm of the bridge's hybrid retrieval. Returns doc_ids, best first.
+
+    `op` picks how terms combine. OR is right for retrieval -- the bridge wants
+    the best matches and fuses them with a vector arm, so recall matters more than
+    precision. AND is right for *counting* how much of a corpus discusses
+    something: under OR, "home depot" matches 52 documents in a cold-plunge corpus
+    because 48 of them merely say "home", which measures nothing.
+    """
     # Strip FTS5 operators; user/LLM queries are natural language, not FTS syntax.
     safe = "".join(c if c.isalnum() or c.isspace() else " " for c in query).strip()
     if not safe:
         return []
-    terms = " OR ".join(safe.split())
+    terms = f" {op} ".join(safe.split())
     try:
         rows = con.execute(
             """SELECT doc_id FROM documents_fts
@@ -259,3 +286,56 @@ def save_themes(con: sqlite3.Connection, run_id: str, themes: list[Theme]) -> No
 def load_themes(con: sqlite3.Connection, run_id: str) -> list[Theme]:
     rows = con.execute("SELECT payload FROM themes WHERE run_id=? ORDER BY id", (run_id,))
     return [Theme.model_validate_json(r["payload"]) for r in rows]
+
+
+# --- demand -------------------------------------------------------------------
+
+
+def save_queries(con: sqlite3.Connection, run_id: str, queries: list) -> int:
+    """Persist harvested autocomplete observations. Returns the number stored.
+
+    One row per (query, source, seed): which sources agree and how highly each
+    ranked a query is the whole basis of the demand score, so the observations
+    are kept rather than collapsed to a distinct set.
+    """
+    con.execute("DELETE FROM queries WHERE run_id=?", (run_id,))
+    con.executemany(
+        """INSERT OR IGNORE INTO queries (run_id, text, source, seed, depth, rank)
+           VALUES (?,?,?,?,?,?)""",
+        [(run_id, q.text, q.source, q.seed, q.depth, q.rank) for q in queries],
+    )
+    con.commit()
+    return con.execute(
+        "SELECT COUNT(*) c FROM queries WHERE run_id=?", (run_id,)
+    ).fetchone()["c"]
+
+
+def load_queries(con: sqlite3.Connection, run_id: str) -> list:
+    from ideafindr.demand.models import Query
+
+    rows = con.execute(
+        "SELECT text, source, seed, depth, rank FROM queries WHERE run_id=?", (run_id,)
+    )
+    return [
+        Query(text=r["text"], source=r["source"], seed=r["seed"],
+              depth=r["depth"], rank=r["rank"])
+        for r in rows
+    ]
+
+
+def save_demand_clusters(con: sqlite3.Connection, run_id: str, clusters: list) -> None:
+    con.execute("DELETE FROM demand_clusters WHERE run_id=?", (run_id,))
+    con.executemany(
+        "INSERT INTO demand_clusters (run_id, id, payload) VALUES (?,?,?)",
+        [(run_id, c.id, c.model_dump_json()) for c in clusters],
+    )
+    con.commit()
+
+
+def load_demand_clusters(con: sqlite3.Connection, run_id: str) -> list:
+    from ideafindr.demand.models import DemandCluster
+
+    rows = con.execute(
+        "SELECT payload FROM demand_clusters WHERE run_id=? ORDER BY id", (run_id,)
+    )
+    return [DemandCluster.model_validate_json(r["payload"]) for r in rows]

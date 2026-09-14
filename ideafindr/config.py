@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     tiktok_ms_token: str = ""
     instagram_session_user: str = ""
 
+    # --- demand ---------------------------------------------------------------
+    # Autocomplete endpoints are undocumented and unmetered; 3/s is polite enough
+    # to stay welcome and fast enough that a full sweep finishes in a minute or two.
+    demand_rps: float = 3.0
+    demand_max_queries: int = 1200
+
     # --- bridge ---------------------------------------------------------------
     bridge_host: str = "127.0.0.1"
     bridge_port: int = 8899

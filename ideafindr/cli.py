@@ -154,6 +154,7 @@ def report(
         run = db.get_run(con, rid)
         themes = db.load_themes(con, rid)
         docs = list(db.iter_documents(con, rid))
+        demand_clusters = db.load_demand_clusters(con, rid)
     finally:
         con.close()
 
@@ -178,7 +179,7 @@ def report(
     md, html = render(
         run=run, themes=themes, stats=corpus_stats(docs),
         language=language_bank(docs), sov=share_of_voice(docs, run.plan.brands),
-        summary=summary,
+        summary=summary, demand=demand_clusters,
     )
     console.print(f"\n[green]Report written[/]\n  {md}\n  {html}")
 
@@ -230,6 +231,50 @@ def ask(
     with console.status("Searching the corpus…"):
         answer = searcher.ask(rid, question)
     console.print(answer)
+
+
+def _show_demand(clusters) -> None:
+    t = Table(header_style="bold")
+    t.add_column("#", width=3, justify="right")
+    t.add_column("Search intent", overflow="fold")
+    t.add_column("Queries", justify="right", width=7)
+    t.add_column("Demand", justify="right", width=7)
+    t.add_column("Corpus", justify="right", width=6)
+    t.add_column("Gap", justify="right", width=6)
+    for i, c in enumerate(clusters, 1):
+        colour = "green" if c.gap > 0.25 else ("dim" if c.gap < -0.25 else "white")
+        t.add_row(str(i), c.label, str(len(c.unique_texts())),
+                  f"{c.demand_score:.1f}", str(c.coverage),
+                  f"[{colour}]{c.gap:+.2f}[/]")
+    console.print(t)
+    console.print(
+        "[dim]Gap = demand percentile − corpus-coverage percentile. Positive means "
+        "people search it more than your corpus discusses it.[/]"
+    )
+
+
+@app.command()
+def demand(
+    topic: str = typer.Argument(None, help="Defaults to the most recent run's topic."),
+    run_id: str = typer.Option(None, "--run", help="Attach to this run instead of the newest."),
+    depth: int = typer.Option(2, help="1 = expand the topic only. 2 = also expand what it finds."),
+    no_label: bool = typer.Option(False, "--no-label", help="Skip LLM intent naming."),
+    reuse: bool = typer.Option(False, "--reuse", help="Re-cluster stored queries without re-harvesting."),
+    verbose: bool = typer.Option(False, "-v"),
+) -> None:
+    """Harvest what people SEARCH for, and find the gaps your corpus doesn't cover."""
+    _setup(verbose)
+    rid = _resolve_run(run_id)
+    msg = "Re-clustering stored queries…" if reuse else "Harvesting the query space…"
+    with console.status(msg):
+        clusters = pipeline.run_demand(rid, topic=topic, depth=depth,
+                                       label=not no_label, reuse=reuse)
+    if not clusters:
+        console.print("[yellow]No queries harvested.[/] The suggest endpoints returned nothing.")
+        raise typer.Exit(1)
+    _show_demand(clusters)
+    n = len({q.key for c in clusters for q in c.queries})
+    console.print(f"\n[dim]run {rid} · {n} distinct queries · {len(clusters)} intents[/]")
 
 
 @app.command()

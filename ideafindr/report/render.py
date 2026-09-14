@@ -103,6 +103,29 @@ Keywords: {{ t.keywords | join(", ") }}
 {% endfor %}
 {% endfor %}
 
+{% if demand %}
+## Search demand
+
+What people type into Google, YouTube, Bing and DuckDuckGo about this topic,
+grouped by intent. **Gap** is this intent's demand rank minus its coverage rank in
+the corpus above: positive means people search it more than the conversation
+covers it.
+
+| # | Search intent | Queries | Demand | Corpus | Gap | Explained by |
+|---|---------------|---------|--------|--------|-----|--------------|
+{% for c in demand -%}
+| {{ loop.index }} | {{ c.label }} | {{ c.query_count }} | {{ "%.1f"|format(c.demand_score) }} | {{ c.coverage }} | {{ "%+.2f"|format(c.gap) }} | {{ c.theme_label or "—" }} |
+{% endfor %}
+
+### Queries in their own words
+
+{% for c in demand %}
+**{{ c.label }}**{% if c.description %} — {{ c.description }}{% endif %}
+
+{% for q in c.sample %}`{{ q }}`{% if not loop.last %} · {% endif %}{% endfor %}
+{% endfor %}
+{% endif %}
+
 ## Language bank
 
 The words and phrases people actually use — raw material for copy.
@@ -135,6 +158,13 @@ market. Web articles carry their collection date, not their publication date, so
 they are excluded from trend and momentum figures. Momentum compares a theme's
 share of the last 30 days against its share of the whole window; it measures
 relative change within this corpus, not absolute market growth.
+
+**On search demand.** The demand figure is built from autocomplete rank across
+four search engines, not from search volume — no free source of calibrated volume
+exists (Google's own Trends API is alpha and application-only). It says a query is
+prominent relative to the others in this report; it does not say how many people
+searched it, and it is not comparable across topics. Autocomplete is also
+personalised and regionalised; these were collected pinned to en-US.
 """
 
 # --- html ---------------------------------------------------------------------
@@ -230,6 +260,41 @@ HTML = """<!doctype html>
 </div>
 {% endfor %}
 
+{% if demand %}
+<h2>Search demand</h2>
+<p class="meta">What people type into Google, YouTube, Bing and DuckDuckGo about
+this topic, grouped by intent. <strong>Gap</strong> is demand rank minus corpus
+coverage rank — positive means people search it more than the conversation covers it.</p>
+<div class="tbl-wrap"><table>
+<tr><th>Search intent</th><th>Queries</th><th>Demand</th><th>Corpus</th><th>Gap</th><th></th><th>Explained by</th></tr>
+{% for c in demand %}
+<tr>
+  <td>{{ c.label }}</td>
+  <td>{{ c.query_count }}</td>
+  <td>{{ "%.1f"|format(c.demand_score) }}</td>
+  <td>{{ c.coverage }}</td>
+  <td><span class="pill {{ c.gap_cls }}">{{ "%+.2f"|format(c.gap) }}</span></td>
+  <td>{{ c.gap_bar | safe }}</td>
+  <td>{{ c.theme_label or "—" }}</td>
+</tr>
+{% endfor %}
+</table></div>
+
+{% for c in demand %}
+<div class="card">
+  <h3>{{ c.label }}</h3>
+  <div class="meta">
+    <span class="pill {{ c.gap_cls }}">gap {{ "%+.2f"|format(c.gap) }}</span>
+    <span class="pill">{{ c.query_count }} queries</span>
+    <span class="pill">{{ c.coverage }} docs in corpus</span>
+    {% for src, n in c.sources.items() %}<span class="pill">{{ src }} {{ n }}</span>{% endfor %}
+  </div>
+  {% if c.description %}<p>{{ c.description }}</p>{% endif %}
+  <div class="lang">{% for q in c.sample %}<span>{{ q }}</span>{% endfor %}</div>
+</div>
+{% endfor %}
+{% endif %}
+
 <h2>Language bank</h2>
 <p class="meta">The words and phrases people actually use — raw material for copy.</p>
 <div class="lang">{% for w, c in language %}<span>{{ w }} <small>{{ c }}</small></span>{% endfor %}</div>
@@ -262,7 +327,14 @@ others — treat these themes as what an engaged online subset says, not the who
 market. Web articles carry their collection date, not publication date, so they
 are excluded from trend and momentum figures. Momentum compares a theme's share
 of the last 30 days against its share of the full window: it measures relative
-change <em>within this corpus</em>, not absolute market growth.</p>
+change <em>within this corpus</em>, not absolute market growth.
+<br><br><strong>On search demand.</strong> The demand figure is built from
+autocomplete rank across four search engines, not search volume — no free source
+of calibrated volume exists (Google's own Trends API is alpha and
+application-only). It says a query is prominent relative to the others in this
+report; it does not say how many people searched it, and it is not comparable
+across topics. Autocomplete is personalised and regionalised; these were collected
+pinned to en-US.</p>
 
 </div></body></html>
 """
@@ -292,6 +364,15 @@ def _md_to_html(text: str) -> str:
     return "\n".join(out)
 
 
+def gap_tag(g: float) -> str:
+    """Under-served, matched, or saturated. Thresholds mirror momentum_tag's."""
+    if g >= 0.25:
+        return "rising"   # reuses the green pill: an opportunity
+    if g <= -0.25:
+        return "fading"
+    return "steady"
+
+
 def render(
     run: Run,
     themes: list[Theme],
@@ -299,6 +380,7 @@ def render(
     language: list[tuple[str, int]],
     sov: dict,
     summary: str = "",
+    demand: list | None = None,
     out_dir: Path | None = None,
 ) -> tuple[Path, Path]:
     # Two environments, deliberately. Every value interpolated below -- theme
@@ -329,9 +411,24 @@ def render(
 
     sov_h = {b: {**v, "bar": bar(float(v["share"]))} for b, v in sov.items()}
 
+    # Demand clusters arrive as pydantic models; flatten to the few fields the
+    # templates need so neither template reaches through an object graph.
+    dem = []
+    for c in demand or []:
+        texts = c.unique_texts()
+        dem.append({
+            "label": c.label, "description": c.description,
+            "query_count": len(texts), "sample": texts[:18],
+            "demand_score": c.demand_score, "coverage": c.coverage,
+            "gap": c.gap, "gap_cls": gap_tag(c.gap),
+            # Map -1..+1 onto a 0..100 bar so the width reads as "how under-served".
+            "gap_bar": bar((c.gap + 1) * 50),
+            "theme_label": c.theme_label, "sources": c.sources,
+        })
+
     ctx = dict(
         run=run, themes=enriched, stats=stats, language=language,
-        sov=sov, now=now, stance=STANCE_LABEL, summary=summary,
+        sov=sov, now=now, stance=STANCE_LABEL, summary=summary, demand=dem,
         unthemed=sum(t.volume for t in incoherent),
     )
 
