@@ -15,7 +15,8 @@ dependencies = [
     "jinja2>=3.1",
     # llm (openai-compatible -> ollama cloud)
     "openai>=1.60",
-    # embeddings: see ideafindr/embed.py -- backend chosen at runtime (musl constraint)
+    # embeddings: see ideafindr/embed.py -- remote provider or in-process TF-IDF,
+    # chosen at runtime. Never a local model: the deployment target is low-end.
     # clustering
     "numpy>=1.26",
     "scikit-learn>=1.5",

@@ -57,7 +57,8 @@ because meaningful X search needs a paid API tier — the `Collector` protocol i
 ## Setup
 
 ```bash
-uv sync                      # everything you need
+uv sync --extra dev          # everything you need, plus the test suite
+uv sync --extra engines      # + gpt-researcher / deep-searcher (needs an embeddings provider)
 uv sync --extra scrapers     # + TikTok and Instagram (read the warning below)
 
 cp .env.example .env         # then add your Ollama Cloud key
@@ -70,31 +71,42 @@ behaves, in particular whether your Ollama Cloud key authorises embeddings.
 
 ### Embeddings
 
-This stack is **cloud-only**: every LLM call goes to Ollama Cloud, and nothing
-runs locally except the pipeline itself.
+Nothing runs a model on this machine. Chat goes to Ollama Cloud; embeddings come
+from a remote provider or not at all.
 
 **Ollama Cloud serves no embeddings.** `/v1/embeddings` returns
 `404 path not found` and `/api/embed` returns `401 unauthorized` for cloud keys
 (verified 2026-09-12). Chat works fine.
 
-So clustering uses **TF-IDF + SVD** — pure scikit-learn, in-process, instant, no
-API key, no daemon, no container. It is a real implementation, not a stub: it
-clusters short social posts well enough to produce usable themes. Its weakness is
-paraphrase — it cannot tell that "my chiller is deafening" and "the compressor
-keeps the neighbours up" are the same complaint, because they share no words.
+So by default clustering uses **TF-IDF + SVD** — pure scikit-learn, in-process,
+instant, no API key. It is a real implementation, not a stub: it clusters short
+social posts well enough to produce usable themes. Its weakness is paraphrase —
+it cannot tell that "my chiller is deafening" and "the compressor keeps the
+neighbours up" are the same complaint, because they share no words.
 
-**What this costs you:** `report --engine gpt-researcher` and `ask` do not work.
-Both build their own vector stores and require an embeddings API; neither can use
-an in-process embedder. They fail with an explicit message saying so. Everything
-else — `plan`, `collect`, `analyze`, `report`, `runs` — is unaffected, and the
-report keeps all its sections except the LLM-written executive summary.
+**What that costs you:** `report --engine gpt-researcher` and `ask` do not work.
+Both build their own vector stores and need a reachable embeddings API; neither
+can use an in-process embedder. They fail with an explicit message saying so.
+Everything else — `plan`, `collect`, `analyze`, `report`, `runs` — is unaffected,
+and the report keeps every section except the LLM-written executive summary.
 
-**To enable those two commands later**, add any provider that actually serves
-embeddings (Jina and Voyage have free tiers with OpenAI-compatible endpoints;
-OpenAI, Cohere and Together also work) and point `EMBED_BACKEND` at it. The
-backend chain in `ideafindr/embed.py` is the only place that needs to change, and
-`EMBED_BACKEND=auto` will pick up an Ollama Cloud embeddings endpoint
-automatically if one ever ships.
+**To turn on a real embedder**, point `EMBED_BASE_URL` / `EMBED_API_KEY` at any
+OpenAI-compatible `/v1/embeddings` endpoint. Jina and Voyage have free tiers;
+OpenAI, Cohere and Together also work. No code change — one class
+(`OpenAICompatEmbedder`) covers every provider:
+
+```bash
+EMBED_BACKEND=auto
+EMBED_BASE_URL=https://api.jina.ai/v1
+EMBED_API_KEY=jina_...
+EMBED_MODEL=jina-embeddings-v3
+```
+
+`EMBED_BACKEND=auto` probes your provider, then Ollama Cloud (in case it ever
+ships embeddings), then falls back to TF-IDF. `ollama-local` exists but is
+deliberately **not** in the `auto` chain: a daemon appearing on this box must not
+silently capture embedding work on hardware that cannot afford it. Name it
+explicitly if you are on a bigger machine.
 
 ### Models
 
@@ -124,12 +136,13 @@ Measured on a 600-word request at `max_tokens=2000`:
 `finish_reason` and the reasoning length rather than passing an empty string
 along, so if you switch models you find out immediately.
 
-> **Note for musl systems (Alpine, Chimera).** `fastembed` and
-> `sentence-transformers` are *not installable* — `onnxruntime` and PyTorch ship
-> glibc-only wheels. That's why the fallback chain exists and why TF-IDF is a
-> real implementation rather than a stub. It clusters short social posts
-> decently; it's weaker at grouping posts that mean the same thing in different
-> words, which the LLM labelling step partly compensates for.
+> **Why a fallback chain at all?** It was written on Chimera Linux (musl),
+> where `fastembed` and `sentence-transformers` are not installable —
+> `onnxruntime` and PyTorch ship glibc-only wheels. The project now runs on
+> glibc, so that particular constraint is gone, but the chain stays: the
+> deployment target is low-end hardware where running a local model is the wrong
+> trade regardless of what pip will install. TF-IDF remains a real
+> implementation rather than a stub.
 
 ---
 
@@ -144,7 +157,7 @@ ideafindr runs                            # list past runs
 ideafindr bridge                          # run the retriever endpoint standalone
 ideafindr doctor                          # re-run the preflight probes
 
-# needs an embeddings provider (see Setup) -- not available cloud-only:
+# needs an embeddings provider (see Setup) -- unavailable with the TF-IDF default:
 #   ideafindr report [run] --engine gpt-researcher
 #   ideafindr ask "question" --run <run>
 ```

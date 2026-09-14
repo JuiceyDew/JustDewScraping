@@ -13,6 +13,7 @@ from pathlib import Path
 
 from jinja2 import Environment
 
+from ideafindr.config import settings
 from ideafindr.models import Quote, Run, Theme
 
 STANCE_LABEL = {
@@ -334,7 +335,10 @@ def render(
         unthemed=sum(t.volume for t in incoherent),
     )
 
-    out = out_dir or Path("data/reports") / run.id
+    # settings.reports_dir is absolute (derived from config.ROOT). A relative
+    # "data/reports" here would scatter reports wherever the CLI happened to be
+    # invoked from, while every other path in the project resolves consistently.
+    out = out_dir or settings.reports_dir / run.id
     out.mkdir(parents=True, exist_ok=True)
 
     md_path = out / "report.md"

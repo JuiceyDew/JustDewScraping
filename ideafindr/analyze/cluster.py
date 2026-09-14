@@ -1,9 +1,14 @@
 """Documents -> themes.
 
-Agglomerative clustering with a cosine distance threshold rather than k-means:
-we do not know how many themes a topic has, and forcing a preset k invents
-themes that aren't there. (HDBSCAN was the first choice but is sdist-only and
-this box is musl; agglomerative is in the sklearn wheel and needs no compiler.)
+Spherical k-means: KMeans over L2-normalised vectors, where euclidean distance is
+monotonic with cosine. Hierarchical linkage was tried first and abandoned -- see
+the measurements in cluster_documents(): on an 805-document corpus it kept
+peeling small groups off one dense core, leaving a single "theme" holding 43-51%
+of the corpus, which is not a finding anyone can act on. k-means balances by
+construction and is faster on big corpora.
+
+k is not knowable in advance, so auto_k() derives a readable target from corpus
+size and _split_oversized() breaks up any cluster that still swallows too much.
 """
 
 from __future__ import annotations

@@ -106,13 +106,22 @@ def run_analysis(run_id: str, n_clusters: int | None = None, label: bool = True)
 
         # `kept` is what M is aligned to -- cluster_documents drops content-free docs.
         themes, M, kept = cluster_documents(docs, n_clusters=n_clusters)
+
+        # Decide about labelling once, up front. label_themes() catches Exception
+        # per theme, so a missing key never propagates here -- it just burns the
+        # full tenacity backoff (~6s) on every single theme before falling back to
+        # exactly the keyword labels below. That is two minutes of nothing on a
+        # 19-theme run.
+        if label and not settings.ollama_api_key:
+            log.warning("no LLM key configured; themes keep keyword labels")
+            label = False
+
         if label:
-            try:
-                themes = label_themes(themes, kept, M, run.topic)
-            except LLMNotConfigured:
-                log.warning("no LLM key; themes keep keyword labels")
-                for t in themes:
-                    t.label = ", ".join(t.keywords[:4]) or f"Theme {t.id}"
+            themes = label_themes(themes, kept, M, run.topic)
+        else:
+            # What --no-label advertises: "keyword labels only", not "Theme 3".
+            for t in themes:
+                t.label = ", ".join(t.keywords[:4]) or t.label
         themes = attach_quotes(themes, kept, M)
         themes = compute_theme_signals(themes, kept)
         db.save_themes(con, run_id, themes)

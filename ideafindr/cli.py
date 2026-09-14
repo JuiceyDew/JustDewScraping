@@ -43,6 +43,24 @@ def _resolve_run(run_id: str | None) -> str:
         con.close()
 
 
+def _parse_sources(sources: str) -> list[str]:
+    """Split and validate --sources.
+
+    Unvalidated, `--sources reddt` silently builds no collectors and the run
+    ends with 0 documents and no explanation of why.
+    """
+    srcs = [s.strip().lower() for s in sources.split(",") if s.strip()]
+    unknown = [s for s in srcs if s not in pipeline.ALL_SOURCES]
+    if unknown:
+        console.print(f"[red]Unknown source(s):[/] {', '.join(unknown)}")
+        console.print(f"[dim]Valid sources: {', '.join(pipeline.ALL_SOURCES)}[/]")
+        raise typer.Exit(1)
+    if not srcs:
+        console.print("[red]No sources given.[/]")
+        raise typer.Exit(1)
+    return srcs
+
+
 def _show_plan(plan) -> None:
     t = Table(show_header=False, box=None, pad_edge=False)
     t.add_column(style="dim", width=12)
@@ -94,7 +112,7 @@ def collect(
 ) -> None:
     """Collect a corpus for a topic."""
     _setup(verbose)
-    srcs = [s.strip() for s in sources.split(",") if s.strip()]
+    srcs = _parse_sources(sources)
     p = pipeline.plan_for(topic, days)
     _show_plan(p)
     if not yes and not typer.confirm("\nCollect with this plan?", default=True):
@@ -178,7 +196,7 @@ def research(
 ) -> None:
     """Collect, analyse and report on a topic, end to end."""
     _setup(verbose)
-    srcs = [s.strip() for s in sources.split(",") if s.strip()]
+    srcs = _parse_sources(sources)
     p = pipeline.plan_for(topic, days)
     _show_plan(p)
     if not yes and not typer.confirm("\nRun with this plan?", default=True):
@@ -250,7 +268,11 @@ def doctor() -> None:
     """Check external dependencies (same probes as scripts/preflight.py)."""
     import subprocess, sys
 
-    subprocess.run([sys.executable, "scripts/preflight.py"], check=False)
+    from ideafindr.config import ROOT
+
+    # Resolved from the package, not the cwd: `ideafindr doctor` must work from
+    # anywhere, the same as every other command.
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "preflight.py")], check=False)
 
 
 if __name__ == "__main__":
