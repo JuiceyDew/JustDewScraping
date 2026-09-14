@@ -146,14 +146,54 @@ along, so if you switch models you find out immediately.
 
 ---
 
-## Commands
+## Using it
+
+`ideafindr` with no arguments opens the TUI, which is the primary interface:
+
+```bash
+ideafindr
+```
+
+```
+ Runs                  │ Themes  Demand  Search  Compare
+ cold plunge tubs  716 │  1  Recovery and relapse stories   104  1.07  pain point
+ cold plunge tubs  673 │  2  Chiller sizing and insulation   99  0.83  question
+                       │  3  Water flow and pump problems    53  1.09  pain point
+───────────────────────┴────────────────────────────────────────────────────────
+ 20:33:01  discovered r/coldplunge(13,000), r/becomingtheiceman(8,200)
+ 20:33:04  collector reddit returned 681 documents
+```
+
+| key | |
+|---|---|
+| `n` | new run — prompts for a topic, then collects with live status |
+| `a` | analyze the selected run into themes |
+| `d` | harvest search demand and find content gaps |
+| `r` | render the report |
+| `s` | search the corpus (full-text, scoped to the selected run) |
+| `c` | compare the selected run against the next one |
+| `^t` | toggle light/dark |
+
+It uses your terminal's own 16-colour palette rather than hardcoded colours, so
+it matches whatever scheme you already run.
+
+The activity panel is the pipeline's own log, so a collection shows which
+subreddits resolved, how much came back and what got dropped as off-topic —
+rather than a spinner.
+
+### Commands
+
+Every stage is also a subcommand, for scripting and for anywhere a full-screen
+app is the wrong shape:
 
 ```bash
 ideafindr plan    "topic"                 # show the collection plan, collect nothing
 ideafindr collect "topic" --days 180      # build a corpus
 ideafindr analyze [run]  [-k 15]          # cluster → label → quotes → signals
 ideafindr research "topic"                # all of the above, end to end
+ideafindr demand  [--reuse]               # harvest search demand, find gaps
 ideafindr runs                            # list past runs
+ideafindr tui                             # same as bare `ideafindr`
 ideafindr bridge                          # run the retriever endpoint standalone
 ideafindr doctor                          # re-run the preflight probes
 

@@ -17,8 +17,26 @@ from ideafindr.config import settings
 from ideafindr.report.render import momentum_tag, render
 from ideafindr.store import db
 
-app = typer.Typer(add_completion=False, help="Find out what people are actually saying about any topic.")
+app = typer.Typer(
+    add_completion=False,
+    help="Find out what people are actually saying -- and searching for -- about any topic.",
+    invoke_without_command=True,
+)
 console = Console()
+
+
+@app.callback()
+def main(ctx: typer.Context) -> None:
+    """Launch the TUI when no subcommand is given.
+
+    The TUI is the primary interface; the subcommands remain for scripting and
+    for anywhere a full-screen app is the wrong shape (CI, pipes, ssh one-liners).
+    """
+    if ctx.invoked_subcommand is None:
+        settings.ensure_dirs()
+        from ideafindr.tui.app import run as run_tui
+
+        run_tui()
 
 
 def _setup(verbose: bool) -> None:
@@ -306,6 +324,15 @@ def bridge(verbose: bool = typer.Option(False, "-v")) -> None:
 
     console.print(f"Bridge on [bold]{settings.bridge_url}/retrieve[/]  (Ctrl-C to stop)")
     serve()
+
+
+@app.command()
+def tui() -> None:
+    """Open the interactive terminal UI (same as running `ideafindr` bare)."""
+    settings.ensure_dirs()
+    from ideafindr.tui.app import run as run_tui
+
+    run_tui()
 
 
 @app.command()
