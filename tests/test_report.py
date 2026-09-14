@@ -25,6 +25,35 @@ def test_md_to_html_escapes_injected_markup():
     assert "<strong>bold</strong>" in out
 
 
+def test_html_escapes_scraped_content_everywhere_not_just_the_summary(tmp_path):
+    """Theme labels, descriptions, keywords and quote text all come from scraped
+    Reddit or from an LLM. These reports are emailed and opened from disk, so
+    injected markup would run. Only the summary used to be escaped."""
+    plan = RunPlan(topic="cold plunge tubs", days=90)
+    run = Run(id="r1", topic="cold plunge tubs", created_at=datetime.now(timezone.utc),
+              plan=plan, sources=["reddit"])
+    evil = "<script>alert(1)</script>"
+    theme = Theme(
+        id=0, label=f"Chiller noise {evil}", description=f"Owners say {evil}",
+        stance="pain_point", doc_ids=["reddit:1"], keywords=[evil, "noise"],
+        volume=12, momentum=1.4, trend=[("2026-01-01", 3), ("2026-01-08", 9)],
+        quotes=[Quote(text=f"The chiller is unbearable at 6am {evil} and my neighbour complained",
+                      url="https://www.reddit.com/r/coldplunge/comments/x/y/",
+                      author=evil, community=evil,
+                      created_at=datetime.now(timezone.utc))],
+    )
+    stats = {"documents": 12, "posts": 4, "comments": 8, "articles": 0,
+             "platforms": {"reddit": 12}, "communities": {evil: 12},
+             "authors": 9, "earliest": "2026-01-01", "latest": "2026-03-01"}
+    _, html_path = render(run, [theme], stats, [(evil, 9)], {}, out_dir=tmp_path)
+
+    page = html_path.read_text()
+    assert "<script>" not in page, "scraped markup must never reach the page raw"
+    assert "&lt;script&gt;" in page, "it should appear escaped instead"
+    # The report's own markup must survive escaping.
+    assert "<svg" in page and 'class="spark"' in page, "sparklines are intentional markup"
+
+
 def test_report_is_self_contained_and_cites_sources(tmp_path):
     plan = RunPlan(topic="cold plunge tubs", days=90, brands=["Ice Barrel"])
     run = Run(id="r1", topic="cold plunge tubs", created_at=datetime.now(timezone.utc),

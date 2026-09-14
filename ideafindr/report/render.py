@@ -191,7 +191,7 @@ HTML = """<!doctype html>
 
 {% if summary %}
 <h2>Executive summary</h2>
-<div class="card">{{ summary_html }}</div>
+<div class="card">{{ summary_html | safe }}</div>
 {% endif %}
 
 <h2>Theme map</h2>
@@ -300,7 +300,15 @@ def render(
     summary: str = "",
     out_dir: Path | None = None,
 ) -> tuple[Path, Path]:
-    env = Environment(autoescape=False)
+    # Two environments, deliberately. Every value interpolated below -- theme
+    # labels, descriptions, keywords, quote text, authors, communities -- is
+    # scraped from Reddit or written by an LLM, so the HTML must escape it: these
+    # reports get emailed around and opened from disk, where injected markup runs.
+    # Markdown must NOT be escaped: &, < and > are ordinary prose there, and
+    # escaping them would corrupt the document. The HTML template marks its
+    # intentional markup (`spark`, `mom_icon`, `bar`, `summary_html`) `| safe`.
+    env_md = Environment(autoescape=False)
+    env_html = Environment(autoescape=True)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     # The documents in an incoherent cluster are real, so they still count in the
@@ -330,10 +338,10 @@ def render(
     out.mkdir(parents=True, exist_ok=True)
 
     md_path = out / "report.md"
-    md_path.write_text(env.from_string(MD).render(**ctx), encoding="utf-8")
+    md_path.write_text(env_md.from_string(MD).render(**ctx), encoding="utf-8")
 
     html_ctx = {**ctx, "sov": sov_h, "summary_html": _md_to_html(summary)}
     html_path = out / "report.html"
-    html_path.write_text(env.from_string(HTML).render(**html_ctx), encoding="utf-8")
+    html_path.write_text(env_html.from_string(HTML).render(**html_ctx), encoding="utf-8")
 
     return md_path, html_path
