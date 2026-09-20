@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}ideafindr{% endblock %}
+{% block body %}
+<h1>ideafindr</h1>
+<p class="sub">what people say · what people search</p>
+
+{% if active %}
+<section>
+  <h2>Running</h2>
+  <ul class="runs">
+    {% for j in active %}
+    <li>
+      <a href="/research/{{ j.id }}">{{ j.title }}</a>
+      <span class="meta">{{ j.stage_states.get(j.stage, '') }} · {{ j.stage }}</span>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section>
+  <h2>New research</h2>
+  <form method="post" action="/research" class="card">
+    <label>Topic
+      <input name="topic" placeholder="e.g. cold plunge tubs" required autofocus>
+    </label>
+    <label>Window
+      <input name="days" type="number" value="180" min="7" max="3650">
+      <span class="meta">days back</span>
+    </label>
+    <fieldset>
+      <legend>Sources</legend>
+      <div class="sources">
+        {% for s in sources %}
+        <label class="chk">
+          <input type="checkbox" name="sources" value="{{ s }}"
+            {% if s in ('reddit','web','bluesky') %}checked{% endif %}>
+          {{ s }}
+        </label>
+        {% endfor %}
+      </div>
+      <p class="meta">x and instagram need cookies (see <a href="/credentials">credentials</a>).</p>
+    </fieldset>
+    <button type="submit">Research</button>
+  </form>
+</section>
+
+<section>
+  <h2>Projects</h2>
+  {% if runs %}
+  <ul class="runs">
+    {% for r in runs %}
+    <li>
+      <a href="/runs/{{ r.id }}">{{ r.topic }}</a>
+      <span class="meta">{{ r.docs }} docs{% if r.themes %} · {{ r.themes }} themes{% endif %} · {{ r.when }}</span>
+      {% if r.has_report %}<a class="pill" href="/runs/{{ r.id }}/report">report</a>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="meta">No runs yet. Start one above.</p>
+  {% endif %}
+</section>
+{% endblock %}

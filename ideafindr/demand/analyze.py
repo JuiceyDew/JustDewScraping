@@ -11,14 +11,10 @@ import logging
 import math
 from collections import Counter
 
-import numpy as np
-from pydantic import BaseModel
-
 from ideafindr.analyze.cluster import auto_k, keywords_for
 from ideafindr.demand.models import DemandCluster, Query
 from ideafindr.embed import Embedder, get_embedder
-from ideafindr.llm import chat_json
-from ideafindr.models import Stance
+from ideafindr.llm import chat_json_batch
 
 log = logging.getLogger(__name__)
 
@@ -64,15 +60,14 @@ into Google, YouTube, Bing and DuckDuckGo about one topic. You name the INTENT
 behind a group of queries -- what the searcher is trying to find out or decide --
 in their terms, never in marketing language."""
 
-PROMPT = """These search queries were grouped together because they express the
-same intent. Topic context: {topic}
+INSTRUCTIONS = """Each numbered cluster below is a group of search queries that
+express the same intent. Context: the overall topic is "{topic}", and there are
+{count} clusters in total.
 
-{samples}
-
-Return JSON:
-- "coherent": true if these really do share one intent; false if the grouping is
-  a grab-bag. Clustering returns a fixed number of groups whether or not that many
-  real intents exist, so a leftovers bucket is expected and useful to flag.
+For EACH cluster return:
+- "coherent": true if the queries really do share one intent; false if the
+  grouping is a grab-bag. Clustering returns a fixed number of groups whether or
+  not that many real intents exist, so a leftovers bucket is expected.
 - "label": 3-8 words naming the intent. Concrete: "Sizing a chiller for a DIY
   build", not "Product research".
 - "description": one sentence on what the searcher wants and why it matters to a
@@ -85,11 +80,41 @@ Return JSON:
   neutral    = none of the above"""
 
 
-class _Label(BaseModel):
-    label: str
-    description: str = ""
-    stance: Stance = "neutral"
-    coherent: bool = True
+def label_clusters(
+    clusters: list[DemandCluster], topic: str, model: str | None = None
+) -> list[DemandCluster]:
+    """Name every intent in a single batched call. A failure on the batch keeps
+    the keyword labels, so the table still renders."""
+    blocks: list[str] = []
+    targets: list[DemandCluster] = []
+    for c in clusters:
+        sample = c.unique_texts()[:20]
+        if not sample:
+            continue
+        blocks.append("\n".join(f"- {s}" for s in sample))
+        targets.append(c)
+
+    if not blocks:
+        return clusters
+
+    try:
+        results = chat_json_batch(
+            blocks,
+            system=SYSTEM,
+            instructions=INSTRUCTIONS.format(topic=topic, count=len(blocks)),
+            model=model,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("batched demand labelling failed (%s); using keyword labels", e)
+        results = [None] * len(blocks)
+
+    for c, res in zip(targets, results):
+        if res is None or not res.label.strip():
+            c.label = ", ".join(c.keywords[:4]) or c.label
+            continue
+        c.label = res.label.strip()
+        c.description = (res.description or "").strip()
+    return clusters
 
 
 def cluster_queries(
@@ -154,28 +179,3 @@ def cluster_queries(
         )
     return clusters
 
-
-def label_clusters(
-    clusters: list[DemandCluster], topic: str, model: str | None = None
-) -> list[DemandCluster]:
-    """Name each intent. A failure on one cluster keeps its keyword label."""
-    for c in clusters:
-        sample = c.unique_texts()[:20]
-        if not sample:
-            continue
-        try:
-            res = chat_json(
-                PROMPT.format(
-                    topic=topic,
-                    samples="\n".join(f"- {s}" for s in sample),
-                ),
-                _Label,
-                system=SYSTEM,
-                model=model,
-            )
-            c.label = res.label.strip() or c.label
-            c.description = res.description.strip()
-        except Exception as e:  # noqa: BLE001
-            log.warning("labelling demand cluster %d failed: %s", c.id, e)
-            c.label = ", ".join(c.keywords[:4]) or c.label
-    return clusters

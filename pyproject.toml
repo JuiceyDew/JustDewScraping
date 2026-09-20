@@ -20,13 +20,18 @@ dependencies = [
     # clustering
     "numpy>=1.26",
     "scikit-learn>=1.5",
-    # bridge
+    # bridge / web UI
     "fastapi>=0.115",
     "uvicorn>=0.32",
+    "python-multipart>=0.0.9",   # form posts in the web UI
+    # credentials: read cookies from the browser on this machine (same-machine
+    # setup). Manual paste and cookie-file upload remain as fallbacks.
+    "browser-cookie3>=0.19",
     # web collector
     "ddgs>=9.0",
     "trafilatura>=2.0",
-    "textual>=8.2.8",
+    # X/Twitter: cookie-based GraphQL scraping, no API key. See collectors/x_twitter.py.
+    "twscrape>=0.15",
 ]
 
 [project.optional-dependencies]
@@ -49,7 +54,20 @@ scrapers = [
     "TikTokApi>=7.1",
     "instaloader>=4.14",
 ]
+# Free social/data sources. All official APIs, no API keys required for basic use.
+social = [
+    # Bluesky (free, no key needed)
+    "atproto",
+    # Mastodon (free, federated social)
+    "mastodon.py>=1.8.0",
+]
+# Google Trends validation of momentum. Unofficial API (pytrends), rate limited;
+# optional because it is a gray-area ToS and not needed for the core report.
+trends = [
+    "pytrends>=4.9",
+]
 dev = [
+    "PyGithub>=2.3",      # GitHub (5000 req/hr free)
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "respx>=0.22",

@@ -12,15 +12,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-# "reddit-search" is a Reddit thread found via a search engine: a permalink and a
-# snippet, with no reliable date. It is kept distinct from "reddit" so the time
-# series can exclude it -- see analyze/signals.UNDATED_PLATFORMS.
-Platform = Literal[
+# Python 3.12+ type aliases for cleaner type hints.
+#
+# These are `TypeAliasType`, which is NOT callable -- collectors must pass plain
+# string literals to Document (platform="bluesky"), never Platform("bluesky").
+type Platform = Literal[
     "reddit", "reddit-search", "web", "hackernews", "lemmy", "stackexchange",
-    "tiktok", "instagram", "x",
+    "tiktok", "instagram", "x", "bluesky", "github", "mastodon", "producthunt",
 ]
-Kind = Literal["post", "comment", "article", "video", "caption"]
-Stance = Literal["pain_point", "desire", "objection", "praise", "question", "neutral"]
+type Kind = Literal["post", "comment", "article", "video", "caption"]
+type Stance = Literal["pain_point", "desire", "objection", "praise", "question", "neutral"]
 
 
 class Document(BaseModel):

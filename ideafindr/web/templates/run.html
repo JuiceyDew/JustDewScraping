@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}{{ run.topic }} · ideafindr{% endblock %}
+{% block body %}
+<h1>{{ run.topic }}</h1>
+<p class="sub">
+  {{ stats.documents }} documents · {{ stats.earliest }} → {{ stats.latest }}
+  · {{ run.sources | join(", ") }}
+</p>
+
+<p class="actions">
+  {% if report_exists %}<a class="pill" href="/runs/{{ run.id }}/report">Open report</a>{% endif %}
+  <form method="post" action="/runs/{{ run.id }}/analyze" class="inline">
+    <button>Re-analyze</button></form>
+  <form method="post" action="/runs/{{ run.id }}/demand" class="inline">
+    <button>Harvest demand</button></form>
+  <form method="post" action="/runs/{{ run.id }}/delete" class="inline"
+        onsubmit="return confirm('Delete this run and its reports?')">
+    <button class="danger">Delete</button></form>
+</p>
+
+{% if stats.platforms %}
+<p class="meta">
+  Platforms:
+  {% for name, n in stats.platforms.items() %}<span class="pill">{{ name }} {{ n }}</span>{% endfor %}
+</p>
+{% endif %}
+
+<section>
+  <h2>Themes</h2>
+  {% if themes %}
+  <table>
+    <tr><th>#</th><th>Theme</th><th>Docs</th><th>Momentum</th><th>Stance</th></tr>
+    {% for t in themes %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>
+        {{ t.label }}
+        {% if not t.coherent %}<span class="pill warn">incoherent</span>{% endif %}
+        {% if t.quotes %}
+        <blockquote>{{ t.quotes[0].text[:240] }}
+          {% if t.quotes[0].url %}— <a href="{{ t.quotes[0].url }}" rel="noopener">{{ t.quotes[0].author or "source" }}</a>{% endif %}
+        </blockquote>
+        {% endif %}
+      </td>
+      <td>{{ t.volume }}</td>
+      <td class="{{ t.cls }}">{{ "%.2f"|format(t.momentum) }}</td>
+      <td>{{ t.stance }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="meta">No themes yet. Run Re-analyze above.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Search demand</h2>
+  {% if demand %}
+  <table>
+    <tr><th>#</th><th>Intent</th><th>Queries</th><th>Demand</th><th>Coverage</th><th>Gap</th></tr>
+    {% for c in demand %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ c.label }}{% if c.description %}<div class="meta">{{ c.description }}</div>{% endif %}</td>
+      <td>{{ c.unique_texts() | length }}</td>
+      <td>{{ "%.1f"|format(c.demand_score) }}</td>
+      <td>{{ c.coverage }}</td>
+      <td class="{{ 'rising' if c.gap > 0.25 else ('fading' if c.gap < -0.25 else '') }}">
+        {{ "%+.2f"|format(c.gap) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="meta">Gap = demand rank − corpus coverage rank. Positive means people
+    search it more than the corpus discusses it.</p>
+  {% else %}
+  <p class="meta">No demand data. Run Harvest demand above.</p>
+  {% endif %}
+</section>
+{% endblock %}

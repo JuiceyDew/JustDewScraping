@@ -44,8 +44,8 @@ MODIFIERS = [
 
 SUFFIXES = [""] + list(string.ascii_lowercase) + MODIFIERS
 
-# Progress reporting: (done, total, note). The TUI needs this, and `collect`'s
-# opaque multi-minute spinner is the thing it exists to replace.
+# Progress reporting: (done, total, note). The web UI shows this, replacing
+# `collect`'s opaque multi-minute spinner.
 ProgressFn = Callable[[int, int, str], None]
 
 

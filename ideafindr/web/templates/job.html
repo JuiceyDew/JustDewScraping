@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }} · ideafindr{% endblock %}
+{% block body %}
+<h1>{{ job.title }}</h1>
+<p class="sub">{{ job.kind }} · status: <span id="status">{{ job.status }}</span></p>
+
+<div class="card">
+  <ol class="stages" id="stages">
+    {% for key, label in job.stages %}
+    <li data-stage="{{ key }}" class="state-{{ job.stage_states.get(key, 'todo') }}">
+      <span class="mark">
+        {%- if job.stage_states.get(key) == 'done' %}✓
+        {%- elif job.stage_states.get(key) == 'active' %}●
+        {%- elif job.stage_states.get(key) == 'failed' %}✗
+        {%- else %}·{% endif -%}
+      </span>
+      {{ label }}
+      <span class="note" data-note="{{ key }}">{{ job.notes.get(key, '') }}</span>
+    </li>
+    {% endfor %}
+  </ol>
+</div>
+
+{% if job.error %}<p class="error">{{ job.error }}</p>{% endif %}
+
+<div class="card">
+  <h3>Log</h3>
+  <pre id="log">{% for stamp, line in job.logs %}<span class="dim">{{ stamp }}</span> {{ line }}
+{% endfor %}</pre>
+</div>
+
+{% if job.finished and job.status == 'done' and job.run_id %}
+<p><a href="/runs/{{ job.run_id }}">Open project →</a></p>
+{% endif %}
+
+<script>
+const JOB = {{ job.id | tojson }};
+async function poll() {
+  try {
+    const r = await fetch(`/api/jobs/${JOB}`);
+    if (!r.ok) return;
+    const j = await r.json();
+    document.getElementById('status').textContent = j.status;
+    for (const [key, state] of Object.entries(j.stage_states)) {
+      const li = document.querySelector(`[data-stage="${key}"]`);
+      if (!li) continue;
+      li.className = 'state-' + state;
+      const mark = state === 'done' ? '✓' : state === 'active' ? '●' : state === 'failed' ? '✗' : '·';
+      li.querySelector('.mark').textContent = mark;
+      const note = li.querySelector(`[data-note="${key}"]`);
+      if (note) note.textContent = j.notes[key] || '';
+    }
+    const log = document.getElementById('log');
+    log.innerHTML = j.logs.map(([t, l]) =>
+      `<span class="dim">${t}</span> ${escapeHtml(l)}`).join('\n');
+    log.scrollTop = log.scrollHeight;
+    if (!j.finished) setTimeout(poll, 1500);
+    else if (j.run_id && j.status === 'done') location.reload();
+  } catch (e) { setTimeout(poll, 3000); }
+}
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+setTimeout(poll, 1000);
+</script>
+{% endblock %}

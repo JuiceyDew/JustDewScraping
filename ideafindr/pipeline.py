@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import shutil
 from datetime import datetime, timezone
 
 from ideafindr.analyze.cluster import cluster_documents
@@ -18,16 +19,16 @@ from ideafindr.analyze.quotes import attach_quotes
 from ideafindr.analyze.signals import compute_theme_signals
 from ideafindr.collectors.base import safe_collect
 from ideafindr.collectors.reddit_arctic import RedditArcticCollector
-from ideafindr.collectors.web import WebCollector
 from ideafindr.config import settings
-from ideafindr.llm import LLMNotConfigured
+from ideafindr.llm import LLMNotConfigured, usage_summary as llm_usage
 from ideafindr.models import Document, RunPlan, Theme
 from ideafindr.store import db
 
 log = logging.getLogger(__name__)
 
-ALL_SOURCES = ["reddit", "web", "dork", "hackernews", "lemmy",
-               "stackexchange", "tiktok", "instagram"]
+ALL_SOURCES = ["reddit", "web", "dork", "hackernews", "lemmy", "stackexchange",
+               "x", "bluesky", "instagram", "tiktok",
+               "github", "mastodon", "producthunt"]
 
 
 def make_run_id(topic: str) -> str:
@@ -43,56 +44,69 @@ def plan_for(topic: str, days: int) -> RunPlan:
         return fallback_plan(topic, days=days)
 
 
+# Collectors that need no extra to be installed. Each entry is
+# (module, class). Imported lazily so an optional dependency missing for one
+# source never breaks a run that does not use it.
+_KEYLESS = {
+    "web": ("ideafindr.collectors.web", "WebCollector"),
+    "dork": ("ideafindr.collectors.dork", "DorkCollector"),
+    "hackernews": ("ideafindr.collectors.hackernews", "HackerNewsCollector"),
+    "lemmy": ("ideafindr.collectors.lemmy", "LemmyCollector"),
+    "stackexchange": ("ideafindr.collectors.stackexchange", "StackExchangeCollector"),
+    "bluesky": ("ideafindr.collectors.bluesky", "BlueskyCollector"),
+    "x": ("ideafindr.collectors.x_twitter", "XCollector"),
+}
+
+# Collectors that come from an optional extra and may raise on import.
+_OPTIONAL = {
+    "tiktok": ("ideafindr.collectors.tiktok", "TikTokCollector"),
+    "instagram": ("ideafindr.collectors.instagram", "InstagramCollector"),
+    "github": ("ideafindr.collectors.github", "GitHubCollector"),
+    "mastodon": ("ideafindr.collectors.mastodon", "MastodonCollector"),
+    "producthunt": ("ideafindr.collectors.producthunt", "ProductHuntCollector"),
+}
+
+
+def _instantiate(module: str, cls: str) -> object | None:
+    try:
+        mod = __import__(module, fromlist=[cls])
+        return getattr(mod, cls)()
+    except Exception as e:  # noqa: BLE001 - a missing extra must not kill a run
+        log.warning("%s unavailable: %s", cls, e)
+        return None
+
+
 def build_collectors(sources: list[str]) -> list:
-    """Optional scrapers are imported lazily: their dependencies are an extra, and
-    an ImportError must not break a run that doesn't use them."""
+    """Resolve source names to collector instances.
+
+    TikTok and Instagram stay off unless their enable flag is set, matching the
+    README: both scrape against platform ToS and should be a deliberate choice.
+    """
     out: list = []
-    if "reddit" in sources:
-        # Reddit's own API when credentials exist, Arctic Shift otherwise. Arctic
-        # Shift is a free archive run by one person and times out on roughly a
-        # fifth of keyword queries; the official API does not, and allows 100
-        # queries/min instead of 2/s.
-        if settings.reddit_client_id and settings.reddit_client_secret:
-            from ideafindr.collectors.reddit_api import RedditAPICollector
+    for source in sources:
+        if source == "reddit":
+            if settings.reddit_client_id and settings.reddit_client_secret:
+                from ideafindr.collectors.reddit_api import RedditAPICollector
+                log.info("reddit: using the official API (credentials found)")
+                out.append(RedditAPICollector())
+            else:
+                log.info("reddit: using Arctic Shift (no credentials); expect some "
+                         "keyword queries to time out")
+                out.append(RedditArcticCollector())
+            continue
 
-            log.info("reddit: using the official API (credentials found)")
-            out.append(RedditAPICollector())
-        else:
-            log.info("reddit: using Arctic Shift (no REDDIT_CLIENT_ID set); expect "
-                     "some keyword queries to time out")
-            out.append(RedditArcticCollector())
-    if "web" in sources:
-        out.append(WebCollector())
-    if "dork" in sources:
-        from ideafindr.collectors.dork import DorkCollector
+        if source in ("tiktok", "instagram"):
+            enabled = settings.enable_tiktok if source == "tiktok" else settings.enable_instagram
+            if not enabled:
+                log.info("%s: skipped (disabled; enable it in settings)", source)
+                continue
 
-        out.append(DorkCollector())
-    if "hackernews" in sources:
-        from ideafindr.collectors.hackernews import HackerNewsCollector
-
-        out.append(HackerNewsCollector())
-    if "lemmy" in sources:
-        from ideafindr.collectors.lemmy import LemmyCollector
-
-        out.append(LemmyCollector())
-    if "stackexchange" in sources:
-        from ideafindr.collectors.stackexchange import StackExchangeCollector
-
-        out.append(StackExchangeCollector())
-    if "tiktok" in sources and settings.enable_tiktok:
-        try:
-            from ideafindr.collectors.tiktok import TikTokCollector
-
-            out.append(TikTokCollector())
-        except Exception as e:  # noqa: BLE001
-            log.warning("tiktok collector unavailable: %s", e)
-    if "instagram" in sources and settings.enable_instagram:
-        try:
-            from ideafindr.collectors.instagram import InstagramCollector
-
-            out.append(InstagramCollector())
-        except Exception as e:  # noqa: BLE001
-            log.warning("instagram collector unavailable: %s", e)
+        spec = _KEYLESS.get(source) or _OPTIONAL.get(source)
+        if not spec:
+            continue
+        if (c := _instantiate(*spec)) is not None:
+            log.info("%s: collector enabled", source)
+            out.append(c)
     return out
 
 
@@ -213,6 +227,64 @@ def run_analysis(run_id: str, n_clusters: int | None = None, label: bool = True)
         db.save_themes(con, run_id, themes)
         # Hand the vectors to the bridge so a report doesn't re-embed the corpus.
         db.save_embeddings(con, run_id, [d.id for d in kept], M)
+        summary = llm_usage()
+        if summary["calls"] or summary["cached"]:
+            log.info(
+                "llm: %d calls, %d cached, %d prompt + %d completion tokens",
+                summary["calls"], summary["cached"],
+                summary["prompt_tokens"], summary["completion_tokens"],
+            )
         return themes
     finally:
         con.close()
+
+
+def delete_run(run_id: str) -> str:
+    """Remove a run: its rows in every table, plus its rendered report directory.
+
+    Lives here rather than in a UI module so the CLI, the web UI and any future
+    caller delete identically. Returns a short human summary.
+    """
+    con = db.connect()
+    try:
+        if not db.get_run(con, run_id):
+            raise ValueError(f"unknown run: {run_id}")
+        counts = db.delete_run(con, run_id)
+    finally:
+        con.close()
+
+    reports = settings.reports_dir / run_id
+    if reports.exists():
+        shutil.rmtree(reports, ignore_errors=True)
+    return f"deleted {counts['documents']} documents, {counts['themes']} themes"
+
+
+def render_report(run_id: str, summary: str = "") -> tuple:
+    """Render the Markdown + self-contained HTML for an analysed run.
+
+    Shared by the CLI, the web job and simple.py so all three produce identical
+    output. `summary` is the optional LLM-written executive summary. Returns
+    (md_path, html_path).
+    """
+    from ideafindr.analyze.signals import corpus_stats, language_bank, share_of_voice
+    from ideafindr.report.render import render
+
+    con = db.connect()
+    try:
+        run = db.get_run(con, run_id)
+        if not run:
+            raise ValueError(f"unknown run: {run_id}")
+        themes = db.load_themes(con, run_id)
+        if not themes:
+            raise ValueError(f"run {run_id} has no themes; analyse it first")
+        docs = list(db.iter_documents(con, run_id))
+        demand = db.load_demand_clusters(con, run_id)
+    finally:
+        con.close()
+
+    return render(
+        run=run, themes=themes, stats=corpus_stats(docs),
+        language=language_bank(docs),
+        sov=share_of_voice(docs, run.plan.brands),
+        summary=summary, demand=demand,
+    )

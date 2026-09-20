@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}settings · ideafindr{% endblock %}
+{% block body %}
+<h1>Settings</h1>
+{% if saved %}<p class="ok">Saved.</p>{% endif %}
+<p class="meta">
+  Stored in the state directory, not the repository. Secret fields left blank keep
+  their current value; the stored value is never sent to this page.
+</p>
+
+<form method="post" action="/settings" class="card">
+  <h3>Ollama Cloud</h3>
+  <label>API key
+    <input name="ollama_api_key" type="password" placeholder="{{ '•••••••• (set)' if secret_flags.ollama_api_key else 'not set' }}">
+  </label>
+  <label>Base URL <input name="ollama_base_url" value="{{ s.ollama_base_url }}"></label>
+  <label>Fast model <input name="fast_model" value="{{ s.fast_model }}"></label>
+  <label>Smart model <input name="smart_model" value="{{ s.smart_model }}"></label>
+  <label>Max completion tokens
+    <input name="llm_max_tokens" type="number" value="{{ s.llm_max_tokens }}" min="256" max="8192">
+    <span class="meta">lower = cheaper/faster; reasoning models may return empty below ~1500</span>
+  </label>
+
+  <h3>Embeddings</h3>
+  <label>Backend
+    <select name="embed_backend">
+      {% for b in ('auto','api','ollama-cloud','ollama-local','tfidf') %}
+      <option value="{{ b }}" {% if s.embed_backend == b %}selected{% endif %}>{{ b }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Model <input name="embed_model" value="{{ s.embed_model }}"></label>
+  <label>Base URL <input name="embed_base_url" value="{{ s.embed_base_url }}"
+      placeholder="https://api.jina.ai/v1"></label>
+  <label>API key
+    <input name="embed_api_key" type="password" placeholder="{{ '•••••••• (set)' if secret_flags.embed_api_key else 'not set' }}">
+  </label>
+
+  <h3>Sources</h3>
+  <label class="chk"><input type="checkbox" name="enable_tiktok" value="1"
+    {% if s.enable_tiktok %}checked{% endif %}> Enable TikTok (ToS-risky)</label>
+  <label class="chk"><input type="checkbox" name="enable_instagram" value="1"
+    {% if s.enable_instagram %}checked{% endif %}> Enable Instagram (ToS-risky)</label>
+
+  <button type="submit">Save</button>
+</form>
+{% endblock %}

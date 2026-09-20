@@ -14,7 +14,7 @@ from pathlib import Path
 from jinja2 import Environment
 
 from ideafindr.config import settings
-from ideafindr.models import Quote, Run, Theme
+from ideafindr.models import Run, Theme
 
 STANCE_LABEL = {
     "pain_point": "Pain point",

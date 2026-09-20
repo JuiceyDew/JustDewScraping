@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+from typing import Literal
 
 import numpy as np
 
@@ -40,12 +41,33 @@ _STOP = set(
 
 MIN_THEME_SIZE = 3
 
+_REPEAT_CHAR = re.compile(r"(.)\1{3,}")
+
+
+def _preprocess_text(text: str) -> str:
+    """Modern text preprocessing for better clustering.
+    
+    Normalizes unicode, removes repeated characters, and cleans artifacts
+    that confuse TF-IDF and embedding models.
+    """
+    import unicodedata
+    
+    if not text:
+        return ""
+    
+    text = text.strip()
+    text = unicodedata.normalize("NFKC", text)
+    text = _REPEAT_CHAR.sub(r"\1\1", text)
+    
+    return text
+
 
 def keywords_for(texts: list[str], n: int = 8) -> list[str]:
     """Distinctive-ish words for a cluster. Cheap; the LLM does the real naming."""
     c: Counter[str] = Counter()
     for t in texts:
-        c.update({w for w in _WORD.findall(strip_noise(t).lower()) if w not in _STOP})
+        cleaned = _preprocess_text(strip_noise(t))
+        c.update({w for w in _WORD.findall(cleaned.lower()) if w not in _STOP})
     return [w for w, _ in c.most_common(n)]
 
 
@@ -123,7 +145,8 @@ def cluster_documents(
     n_clusters: int | None = None,
     min_size: int = MIN_THEME_SIZE,
     max_share: float = 0.25,
-) -> tuple[list[Theme], np.ndarray, list[Document]]:
+    return_quality_metrics: bool = False,
+) -> tuple[list[Theme], np.ndarray, list[Document]] | tuple[list[Theme], np.ndarray, list[Document], dict]:
     """Returns (themes, embedding matrix, the documents the matrix is aligned to).
 
     The third element matters: content-free documents are filtered out here, so
@@ -133,6 +156,10 @@ def cluster_documents(
 
     Clusters smaller than `min_size` are dropped as noise rather than forced into
     a neighbour -- a 'theme' of one post is an anecdote, not a theme.
+    
+    Args:
+        return_quality_metrics: If True, also return clustering quality metrics
+            (silhouette score, Davies-Bouldin index, theme balance).
     """
     from sklearn.cluster import KMeans
 
@@ -193,7 +220,64 @@ def cluster_documents(
                 keywords=keywords_for([texts[i] for i in idxs]),
             )
         )
+    
+    if return_quality_metrics:
+        metrics = _calculate_clustering_quality(M, labels, kept)
+        return themes, M, docs, metrics
+    
     return themes, M, docs
+
+
+def _calculate_clustering_quality(
+    M: np.ndarray,
+    labels: np.ndarray,
+    kept: list[list[int]],
+) -> dict:
+    """Calculate clustering quality metrics.
+    
+    Modern clustering evaluation uses multiple metrics:
+    - Silhouette score: How similar docs are to their own cluster vs others (-1 to 1)
+    - Davies-Bouldin index: Average similarity between clusters (lower is better)
+    - Theme balance: Standard deviation of cluster sizes (lower = more balanced)
+    
+    Returns dict with metrics for logging/reporting.
+    """
+    from sklearn.metrics import davies_bouldin_score, silhouette_score
+    
+    if len(set(labels)) < 2 or len(labels) < 3:
+        return {"error": "insufficient_clusters_or_docs"}
+    
+    try:
+        sil_score = float(silhouette_score(M, labels))
+        db_score = float(davies_bouldin_score(M, labels))
+    except (ValueError, ZeroDivisionError):
+        sil_score = 0.0
+        db_score = float("inf")
+    
+    cluster_sizes = [len(g) for g in kept]
+    avg_size = np.mean(cluster_sizes) if cluster_sizes else 0
+    size_std = np.std(cluster_sizes) if cluster_sizes else 0
+    
+    return {
+        "silhouette_score": round(sil_score, 3),
+        "davies_bouldin_index": round(db_score, 3),
+        "num_themes": len(kept),
+        "avg_theme_size": round(float(avg_size), 1),
+        "theme_size_std": round(float(size_std), 1),
+        "quality_rating": _rate_quality(sil_score, db_score),
+    }
+
+
+def _rate_quality(silhouette: float, davies_bouldin: float) -> str:
+    """Rate overall clustering quality based on metrics."""
+    if silhouette >= 0.5 and davies_bouldin <= 1.0:
+        return "excellent"
+    elif silhouette >= 0.3 and davies_bouldin <= 1.5:
+        return "good"
+    elif silhouette >= 0.1 and davies_bouldin <= 2.0:
+        return "acceptable"
+    else:
+        return "poor_consider_reclustering"
 
 
 def central_documents(
@@ -211,3 +295,79 @@ def central_documents(
     centroid /= max(float(np.linalg.norm(centroid)), 1e-12)
     order = np.argsort(-(sub @ centroid))
     return [docs_by_id[theme.doc_ids[i]] for i in order[:n] if theme.doc_ids[i] in docs_by_id]
+
+
+def select_representative_quotes(
+    theme: Theme,
+    docs: list[Document],
+    M: np.ndarray,
+    index: dict[str, int],
+    n: int = 5,
+) -> list:
+    """Select quotes that best represent the theme, diversified by engagement.
+    
+    Modern retrieval systems select for representativeness AND diversity:
+    - Find documents closest to cluster centroid (most representative)
+    - Diversify by picking from different engagement levels
+    - Filter for quality (minimum length, has text)
+    
+    This produces quotes that users find more insightful than random selection.
+    """
+    from ideafindr.models import Quote
+    
+    idxs = [index[d] for d in theme.doc_ids if d in index]
+    if not idxs:
+        return []
+    
+    sub = M[idxs]
+    centroid = sub.mean(axis=0)
+    centroid /= max(float(np.linalg.norm(centroid)), 1e-12)
+    
+    distances = -(sub @ centroid)
+    ranked = sorted(enumerate(distances), key=lambda x: x[1])
+    
+    quotes: list[Quote] = []
+    engagement_buckets: dict[Literal["low", "med", "high"], list[tuple[int, float]]] = {
+        "low": [], "med": [], "high": []
+    }
+    
+    for pos, (local_idx, dist) in ranked:
+        doc_idx = idxs[local_idx]
+        if doc_idx >= len(docs):
+            continue
+            
+        doc = docs[doc_idx]
+        
+        if not doc.text or len(doc.text.strip()) < 30:
+            continue
+        
+        score = doc.engagement_score()
+        if score < 5:
+            bucket = "low"
+        elif score < 50:
+            bucket = "med"
+        else:
+            bucket = "high"
+        
+        engagement_buckets[bucket].append((local_idx, dist))
+    
+    for bucket in ["low", "med", "high"]:
+        for local_idx, _ in engagement_buckets[bucket]:
+            if len(quotes) >= n:
+                break
+            doc_idx = idxs[local_idx]
+            if doc_idx >= len(docs):
+                continue
+            doc = docs[doc_idx]
+            quotes.append(
+                Quote(
+                    text=doc.text[:500],
+                    url=doc.url,
+                    author=doc.author,
+                    community=doc.community,
+                    created_at=doc.created_at,
+                    engagement=doc.engagement_score(),
+                )
+            )
+    
+    return quotes[:n]

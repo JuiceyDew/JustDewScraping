@@ -3,319 +3,280 @@
 Find out what people are **actually saying** about any topic, and turn it into a
 report a marketing team can act on.
 
-Combines a social-data collection layer (Reddit via Arctic Shift, open web,
-optionally TikTok and Instagram) with a quantitative analysis layer (theme
-clustering, momentum, share of voice, language bank) and
+Combines a social-data collection layer (Reddit via Arctic Shift or the official
+API, X/Twitter, Bluesky, Instagram, the open web, more) with a quantitative
+analysis layer (theme clustering, momentum, share of voice, language bank) and
 [gpt-researcher](https://github.com/assafelovic/gpt-researcher) /
 [deep-searcher](https://github.com/zilliztech/deep-searcher) for written
-synthesis. All LLM calls go to **Ollama Cloud**.
+synthesis. Chat goes to **Ollama Cloud**; embeddings are a hosted provider or
+in-process TF-IDF.
+
+The interface is a small **local web UI** (no build step, no CDN, no app auth),
+served from a Nix flake for a homelab.
 
 ```
-ideafindr research "cold plunge tubs"
+ideafindr              # serves http://0.0.0.0:8000 (reachable on the LAN)
+ideafindr research "cold plunge tubs"   # or drive it from the CLI
 ```
 
 ---
 
-## How the pieces fit
+## Design
 
-The upstream tools don't compose directly: collectors emit platform-specific
-JSON, while research agents expect *a search engine*. The keystone is a small
-**bridge** — a local HTTP endpoint that serves our scraped corpus in the exact
-shape gpt-researcher's `RETRIEVER=custom` expects:
+```
+topic → plan (LLM) → collect → SQLite+FTS → cluster → label (LLM) → signals → report
+                                     │
+                                     ├→ bridge (/retrieve) → gpt-researcher → summary
+                                     └→ export → deep-searcher → follow-up Q&A
+```
+
+The **bridge** is the keystone: a local HTTP endpoint that serves the scraped
+corpus in the exact shape gpt-researcher's `RETRIEVER=custom` expects —
 
 ```json
 [{"url": "https://reddit.com/...", "raw_content": "post + top comments"}]
 ```
 
-That tiny contract means gpt-researcher's whole agent loop — query planning,
-source curation, citation, report writing — runs over scraped social data with
-**no fork of the upstream repo**.
+— so the whole upstream agent loop runs over scraped social data with **no fork**.
 
-```
-topic → plan (LLM) → collect → SQLite+FTS → cluster → label (LLM) → signals → report
-                                     │
-                                     └→ bridge (/retrieve) → gpt-researcher → summary
-                                     └→ export → deep-searcher → follow-up Q&A
-```
-
-| Upstream tool | Where it's used |
+| Component | Where |
 |---|---|
-| Reddit API | `collectors/reddit_api.py` — 100 queries/min; credentials need Reddit's approval, see Setup |
-| `arctic_shift` | `collectors/reddit_arctic.py` — free Reddit archive, the fallback |
-| DDG dorking | `collectors/dork.py` — `site:reddit.com` snippets, never touches Reddit |
-| HN (Algolia) | `collectors/hackernews.py` — free, no key, technical skew |
-| Lemmy | `collectors/lemmy.py` — federated, free; tech topics only in practice |
-| Stack Exchange | `collectors/stackexchange.py` — free, 300/day, planner picks the sites |
-| `gpt-researcher` | `engines/researcher.py` — wired and tested, but needs an embeddings API (see Setup) |
+| Web UI | `ideafindr/web/` — FastAPI + Jinja, server-rendered |
+| Runtime state / secrets | `ideafindr/state.py` — `settings.json`, mode 0600, outside the repo |
+| Reddit (official API) | `collectors/reddit_api.py` — 100 queries/min; needs Reddit approval |
+| Reddit (Arctic Shift) | `collectors/reddit_arctic.py` — free archive, the fallback |
+| X / Twitter | `collectors/x_twitter.py` — twscrape, cookie-based, no API key |
+| Bluesky | `collectors/bluesky.py` — free, no key |
+| Instagram | `collectors/instagram.py` — instaloader; sessionid enables hashtags |
+| Web / dork / HN / Lemmy / Stack Exchange | `collectors/` — free, no key |
+| `gpt-researcher` | `engines/researcher.py` — needs an embeddings API |
 | `deep-searcher` | `engines/searcher.py` — same; `ideafindr ask` |
-| `TikTok-Api` | `collectors/tiktok.py` — optional, off by default |
-| `instaloader` | `collectors/instagram.py` — optional, off by default |
-
-**Not included, deliberately.** `stanford-oval/storm` and `dzhng/deep-research`
-run the same plan→search→synthesize loop as gpt-researcher; running three of
-them is duplicated work for one report section. `xdevplatform/xurl` is deferred
-because meaningful X search needs a paid API tier — the `Collector` protocol in
-`collectors/base.py` is where it drops in when that budget exists.
 
 ---
 
-## Setup
+## Quick start
 
 ```bash
-uv sync --extra dev          # everything you need, plus the test suite
-uv sync --extra engines      # + gpt-researcher / deep-searcher (needs an embeddings provider)
-uv sync --extra scrapers     # + TikTok and Instagram (read the warning below)
-
-cp .env.example .env         # then add your Ollama Cloud key
-uv run python scripts/preflight.py
+uv sync --extra dev
+cp .env.example .env
+uv run ideafindr            # opens the web UI
 ```
 
-`preflight.py` probes every external dependency and prints a pass/fail line per
-endpoint. **Run it first** — it answers questions that change how the pipeline
-behaves, in particular whether your Ollama Cloud key authorises embeddings.
+Then, in the UI:
+
+1. **Settings** — paste your Ollama Cloud key. It is written to
+   `data/settings.json` (mode 0600) and never to the repo.
+2. **Credentials** — add X and/or Instagram cookies (below).
+3. Type a topic on the home page and hit Research.
+
+Run `uv run ideafindr doctor` to probe every external dependency.
+
+---
+
+## Credentials
+
+The UI has no authentication and holds API keys and live session cookies. It
+binds `0.0.0.0:8000` (`WEB_HOST`/`WEB_PORT`, or `ideafindr web --host`) so it is
+reachable on the LAN — but anyone on that network can start a run, read the
+Settings/Credentials pages, or delete projects. **Restrict the firewall to your
+subnet, or put a VPN / authenticating reverse proxy in front of it.** The
+retriever bridge stays on `127.0.0.1`. It stores nothing in the repository.
+
+### The safe way: import from your browser
+
+The UI runs on the same machine you log into, so the Credentials page can read
+that browser's cookie store directly. You log in normally; the platform never
+sees automation.
+
+On Linux, **Firefox** cookies decrypt without an external keyring — it is the
+happy path. Chromium-family reads need the OS keyring, which a headless systemd
+service may not have unlocked, in which case paste manually.
+
+### Manual paste
+
+Every platform has exact steps on the Credentials page. In short: open DevTools
+(F12) → Application → Cookies → copy the values.
+
+| Platform | Cookies | Notes |
+|---|---|---|
+| X / Twitter | `auth_token`, `ct0` | **Dedicated burner account.** No proxy: single account, low volume. |
+| Instagram | `sessionid`, `csrftoken` | Login-gated and rate-limits hard; expect low yield. |
+| Reddit | client id + secret | Optional; see the licensing note below. |
+
+> **Use burner accounts for X and Instagram — never a personal or client
+> account.** Scraping both is against their Terms of Service, which is a
+> commercial and legal exposure when you sell the report, not just a technical
+> risk.
 
 ### Reddit access
 
-Reddit's own API is 50× faster than Arctic Shift and does not time out, and the
-collector for it is written and tested. But **credentials are no longer
-self-service**: Reddit's [Responsible Builder Policy](https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy)
-(November 2025) closed instant signup, and every request now goes to a manual
-review queue with no published timeline and no appeal. The policy also prohibits
-commercial resale or licensing of Reddit data — which covers selling a report
-built on Reddit quotes.
-
-So the pipeline does not assume you have it. Without credentials, `--sources
-reddit` uses Arctic Shift exactly as before, and three sources need no permission
-from anyone:
+Reddit's own API is ~50× faster than Arctic Shift and does not time out, and the
+collector is written and tested. But credentials are no longer self-service:
+Reddit's [Responsible Builder Policy](https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy)
+(November 2025) closed instant signup, and the policy prohibits commercial
+resale of Reddit data. Without credentials, `--sources reddit` uses Arctic Shift.
+Three sources need no permission:
 
 | source | what it gets |
 |---|---|
 | `dork` | Reddit threads via `site:reddit.com` search snippets — never contacts Reddit |
 | `hackernews` | free, no key, officially provided via Algolia; technical skew |
 | `lemmy` | federated and free; in practice only worth it for tech topics |
-| `stackexchange` | free, 300 requests/day; the planner picks the sites, most topics get none |
+| `stackexchange` | free, 300 requests/day; the planner picks the sites |
 
-### Embeddings
+---
+
+## Embeddings
 
 Nothing runs a model on this machine. Chat goes to Ollama Cloud; embeddings come
 from a remote provider or not at all.
 
-**Ollama Cloud serves no embeddings.** `/v1/embeddings` returns
-`404 path not found` and `/api/embed` returns `401 unauthorized` for cloud keys
-(verified 2026-09-12). Chat works fine.
+**Ollama Cloud serves no embeddings.** `/v1/embeddings` returns `404` and
+`/api/embed` returns `401` for cloud keys. Chat works fine.
 
-So by default clustering uses **TF-IDF + SVD** — pure scikit-learn, in-process,
-instant, no API key. It is a real implementation, not a stub: it clusters short
-social posts well enough to produce usable themes. Its weakness is paraphrase —
-it cannot tell that "my chiller is deafening" and "the compressor keeps the
-neighbours up" are the same complaint, because they share no words.
+By default clustering uses **TF-IDF + SVD** — pure scikit-learn, in-process,
+instant, no API key. It is a real implementation, not a stub, but it cannot tell
+that "my chiller is deafening" and "the compressor keeps the neighbours up" are
+the same complaint.
 
 **What that costs you:** `report --engine gpt-researcher` and `ask` do not work.
-Both build their own vector stores and need a reachable embeddings API; neither
-can use an in-process embedder. They fail with an explicit message saying so.
-Everything else — `plan`, `collect`, `analyze`, `report`, `runs` — is unaffected,
-and the report keeps every section except the LLM-written executive summary.
+Both build their own vector stores and need a reachable embeddings API.
+Everything else is unaffected.
 
-**To turn on a real embedder**, point `EMBED_BASE_URL` / `EMBED_API_KEY` at any
-OpenAI-compatible `/v1/embeddings` endpoint. Jina and Voyage have free tiers;
-OpenAI, Cohere and Together also work. No code change — one class
-(`OpenAICompatEmbedder`) covers every provider:
-
-```bash
-EMBED_BACKEND=auto
-EMBED_BASE_URL=https://api.jina.ai/v1
-EMBED_API_KEY=jina_...
-EMBED_MODEL=jina-embeddings-v3
-```
-
-`EMBED_BACKEND=auto` probes your provider, then Ollama Cloud (in case it ever
-ships embeddings), then falls back to TF-IDF. `ollama-local` exists but is
-deliberately **not** in the `auto` chain: a daemon appearing on this box must not
-silently capture embedding work on hardware that cannot afford it. Name it
-explicitly if you are on a bigger machine.
-
-### Models
-
-Ollama Cloud lists model IDs **without** a `-cloud` suffix on the `/v1`
-endpoint. See the live list with `ideafindr doctor`.
-
-Both `FAST_MODEL` and `SMART_MODEL` default to **`gpt-oss:120b`**, and the second
-one is deliberate. Several models on this endpoint are reasoning models that emit
-a `reasoning` field before any `content` and can burn the entire `max_tokens`
-budget doing it — returning HTTP 200 with an **empty message**. Downstream that
-surfaces as `NoneType has no len()` from inside gpt-researcher, which tells you
-nothing about the cause.
-
-Measured on a 600-word request at `max_tokens=2000`:
-
-| model | time | content | finish | reasoning |
-|---|---|---|---|---|
-| `gpt-oss:120b` | 6.2s | 7020 chars | stop | 443 chars |
-| `deepseek-v4-pro:0813` | 14.3s | 5546 chars | stop | 1433 chars |
-| `minimax-m3` | 6.5s | 4271 chars | stop | 1054 chars |
-| `qwen3.5:397b` | 25.2s | 4476 chars | stop | 4332 chars |
-| `mistral-large-3:675b` | 29.3s | 8427 chars | **length** (truncated) | 0 |
-| `glm-5.3` | 32.5s | **0 chars** | length | 9541 chars |
-| `kimi-k3` | — | **0 chars** | — | — |
-
-`ideafindr.llm.chat()` raises `EmptyCompletion` naming the model, the
-`finish_reason` and the reasoning length rather than passing an empty string
-along, so if you switch models you find out immediately.
-
-> **Why a fallback chain at all?** It was written on Chimera Linux (musl),
-> where `fastembed` and `sentence-transformers` are not installable —
-> `onnxruntime` and PyTorch ship glibc-only wheels. The project now runs on
-> glibc, so that particular constraint is gone, but the chain stays: the
-> deployment target is low-end hardware where running a local model is the wrong
-> trade regardless of what pip will install. TF-IDF remains a real
-> implementation rather than a stub.
+To enable a real embedder, set `EMBED_BASE_URL` / `EMBED_API_KEY` in Settings to
+any OpenAI-compatible `/v1/embeddings` endpoint (Jina, Voyage, OpenAI, Cohere,
+Together all work). One class covers every provider — no code change.
 
 ---
 
-## Using it
+## The LLM is used deliberately sparingly
 
-`ideafindr` with no arguments opens the TUI, which is the primary interface.
+Ollama Cloud calls are batched and cached so a run is cheap and fast:
 
-```bash
-ideafindr
-```
+- **One batched call labels every theme**, not one call per theme. A 19-theme
+  run used to make 19 sequential requests; it now makes two, and the batch is
+  chunked so the prompt stays bounded.
+- **Responses are cached** in-process, keyed on the exact request, so
+  re-analysing an unchanged corpus costs nothing. Disable with
+  `IDEAFINDR_LLM_CACHE=0`.
+- **`LLM_MAX_TOKENS` caps the completion budget** (`llm_max_tokens`, default
+  2048). Several models on this endpoint spend the whole budget on a `reasoning`
+  field and return empty content; `ideafindr.llm.chat()` raises
+  `EmptyCompletion` naming the model and `finish_reason` when that happens.
+- Only **planning**, **theme labelling** and **demand labelling** call the model.
+  Clustering, momentum, share of voice and the report body are all local.
 
-Three screens, each doing one thing.
+Both `FAST_MODEL` and `SMART_MODEL` default to **`gpt-oss:120b`** — the tested
+model. Several alternatives (glm-5.3, kimi-k3) return empty content on long
+generations.
 
-**Home** is one list — start something new, or open something old:
+---
 
-```
-                          IDEAFINDR
-             what people say · what people search
+## Using the CLI
 
-    +  New research…
-    cold plunge tubs    716 docs · 19 themes · 12 intents · Sep 13
-    sauna tents         412 docs · 14 themes · Sep 11
-```
-
-Everything is a row, so the arrow keys always move and enter always activates —
-there is no focus to lose. `n` also opens the prompt, `x` deletes the highlighted
-project after confirming.
-
-Typing a topic runs the whole pipeline — plan, collect, cluster, harvest search
-demand, write the report — on a **Research** screen that shows each stage as it
-happens, with the pipeline's own log underneath:
-
-```
-   Researching “cold plunge tubs”
-
-     ✓  Plan the sweep          12 subreddits, 8 keywords
-     ✓  Collect the corpus      716 documents
-     ⠿  Cluster into themes
-     ·  Harvest search demand
-     ·  Write the report
-
-   ┌──────────────────────────────────────────────────────────┐
-   │ 20:45:36  discovered r/coldplunge(13,000), r/becoming…    │
-   │ 20:45:36  collector reddit returned 681 documents         │
-   └──────────────────────────────────────────────────────────┘
-```
-
-Each past project opens as its **own page** — themes, search demand and full-text
-search over that corpus, with `esc` to go back:
-
-| key | on a project page |
-|---|---|
-| `1` `2` `3` | switch to Themes / Demand / Search |
-| `tab` | cycle panes |
-| `a` | re-cluster into themes |
-| `d` | harvest search demand |
-| `r` | write the report |
-| `esc` | back to home |
-| `^t` | toggle light/dark |
-
-The app uses your terminal's own 16-colour palette rather than hardcoded colours,
-so it matches whatever scheme you already run.
-
-### Commands
-
-Every stage is also a subcommand, for scripting and for anywhere a full-screen
-app is the wrong shape:
+Every stage is also a subcommand, for scripting and CI:
 
 ```bash
+ideafindr web                             # the web UI (same as bare `ideafindr`)
 ideafindr plan    "topic"                 # show the collection plan, collect nothing
-ideafindr collect "topic" --days 180      # build a corpus
+ideafindr collect "topic" --days 180 --sources reddit,web,bluesky,x
 ideafindr analyze [run]  [-k 15]          # cluster → label → quotes → signals
 ideafindr research "topic"                # all of the above, end to end
 ideafindr demand  [--reuse]               # harvest search demand, find gaps
 ideafindr runs                            # list past runs
-ideafindr tui                             # same as bare `ideafindr`
 ideafindr bridge                          # run the retriever endpoint standalone
+ideafindr delete  <run>
 ideafindr doctor                          # re-run the preflight probes
 
-# needs an embeddings provider (see Setup) -- unavailable with the TF-IDF default:
-#   ideafindr report [run] --engine gpt-researcher
-#   ideafindr ask "question" --run <run>
+python simple.py "topic"                  # one-shot, no server
 ```
 
-Reports land in `data/reports/<run>/` as `report.md` and a self-contained
+Reports land in `<state>/reports/<run>/` as `report.md` and a self-contained
 `report.html` (inline CSS and SVG, no CDN — it survives being emailed and opened
 from disk).
 
----
+### What's in a report
 
-## What's in a report
-
-1. **Theme map** — themes ranked by volume × momentum, with trend sparklines
-3. **Voice of the customer** — verbatim quotes, never paraphrased, each with a
-   live permalink
-4. **Language bank** — the words and phrases people actually use, for ad copy
-5. **Share of voice** — brand mentions and their trend
-6. **Methodology** — sources, counts, date range, and the caveats below
+Theme map (ranked by volume × momentum, with sparklines) · voice of the customer
+(verbatim quotes with permalinks) · search demand and content gaps · language
+bank · share of voice · methodology with caveats.
 
 **Momentum** is a theme's share of the last 30 days divided by its share of the
-whole window. `>1` means rising faster than the topic overall. It's deliberately
-a *share* rather than raw recent volume, which would just track how much got
-collected.
+whole window. `>1` means rising faster than the topic overall — a share, not raw
+recent volume, which would just track how much was collected.
 
 ---
 
-## Things worth knowing before you sell this to a client
+## Nix
 
-- **Reddit skews the picture.** Younger, more male, more English-speaking, more
-  technical than the general market. The report says so in its methodology
-  section; leave that in.
-- **Arctic Shift is one person's free service** with no uptime guarantee. The
-  client is polite by default (~2 req/s, backoff on 429). Don't raise
-  `ARCTIC_RPS`. If it becomes load-bearing, move to the bulk `.zst` dumps.
-- **Web articles carry their collection date, not publication date** —
-  trafilatura's date extraction is unreliable often enough that trusting it
-  would corrupt the trend charts. Web docs feed themes and quotes but not
-  time-series signals.
-- **TikTok and Instagram scraping violates those platforms' Terms of Service.**
-  For a company selling research to clients that's commercial and legal
-  exposure, not just a technical risk. Both are off by default and every failure
-  is swallowed so a dead scraper degrades the corpus instead of killing the run.
-  Worth a legal read before anything ships to a client.
-  - Instagram specifically is close to non-viable at volume: hashtag browsing is
-    login-gated and anonymous requests hit HTTP 429 within a handful of calls.
-    The default `websearch` mode finds public post URLs via search instead, which
-    yields less but doesn't get accounts banned.
-- **gpt-researcher is a fast-moving dependency.** It's pinned. If a report comes
-  back citing only web sources, check that `RETRIEVER_ENDPOINT` is still the env
-  var name upstream reads — that's the contract that can break silently.
+The repo is a flake: a package, a dev shell, and a NixOS module.
+
+```nix
+{
+  inputs.ideafindr.url = "github:you/ideafindr";
+
+  services.ideafindr = {
+    enable = true;
+    host = "0.0.0.0";     # bind all interfaces to reach it from the LAN
+    port = 8000;
+    openFirewall = true;  # opens only `port`; restrict to your subnet if needed
+    # stateDir defaults to /var/lib/ideafindr (systemd StateDirectory, mode 0700)
+  };
+}
+```
+
+The module runs a hardened systemd service with `IDEAFINDR_STATE_DIR` pointed at
+its `StateDirectory`. **The Ollama key is not configured in Nix** — enter it in
+the web UI and it is stored under the state directory. An `environmentFile` is
+supported for anything you would rather set declaratively; the real environment
+overrides the UI.
+
+```bash
+nix develop        # dev shell with the test and optional-collector extras
+nix build          # the package
+nix run . -- --help
+```
+
+Verified on x86_64-linux: `nix flake check`, `nix build`, and the packaged web
+UI all work, and the test suite passes inside `nix develop`. When installed as a
+package, the default state directory is `$XDG_STATE_HOME/ideafindr` (or
+`~/.local/state/ideafindr`) because the Nix store is read-only; the NixOS module
+overrides this with the systemd `StateDirectory`.
 
 ---
 
 ## Development
 
 ```bash
-uv run pytest                # offline: collector tests use recorded HTTP
+uv run pytest                # offline: collectors use recorded/mocked HTTP
 uv run ideafindr doctor      # live: probes Arctic Shift and Ollama Cloud
 ```
 
-Tests never hit Arctic Shift. They pin the live-API behaviours that actually
-broke things during development:
+Tests never hit the network. They pin the behaviours that actually broke during
+development:
 
-- a `200` response carrying `"data": null` — throttling, must be retried, not
-  read as empty
-- `"Timeout. Maybe slow down a bit"` — the query was too expensive, so the fix
-  is a smaller page, not a longer wait
-- server-side full-text search failing while plain listing succeeds — the slice
-  is recovered by fetching unfiltered and matching the keyword locally, because
-  shrinking the page can't help when the cost is the text search itself
+- a `200` response carrying `"data": null` — throttling, must be retried
+- `"Timeout. Maybe slow down a bit"` — smaller page, not a longer wait
+- server-side full-text search failing while plain listing succeeds
+- PEP 695 `type` aliases are not callable — collectors must pass string literals
+  to `Document`, never `Platform("bluesky")`
+- batched labelling must tolerate a partial answer without shifting labels
+
+---
+
+## Things worth knowing before you sell this to a client
+
+- **Reddit skews the picture.** Younger, more male, more English-speaking, more
+  technical than the general market. The report says so in its methodology.
+- **Arctic Shift is one person's free service** with no uptime guarantee. Don't
+  raise `ARCTIC_RPS`. If it becomes load-bearing, move to the bulk `.zst` dumps.
+- **Web articles carry their collection date, not publication date** —
+  trafilatura's date extraction is unreliable, so web docs feed themes and quotes
+  but not time-series signals.
+- **X, TikTok and Instagram scraping violates those platforms' Terms of
+  Service.** Off by default (except X, which needs cookies anyway), and every
+  failure is swallowed so a dead scraper degrades the corpus instead of killing
+  the run. Worth a legal read before anything ships to a client.
+- **gpt-researcher is a fast-moving dependency.** It's pinned. If a report cites
+  only web sources, check that `RETRIEVER_ENDPOINT` is still the env var name
+  upstream reads.

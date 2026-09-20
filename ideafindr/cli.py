@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -12,9 +10,8 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from ideafindr import pipeline
-from ideafindr.analyze.signals import corpus_stats, language_bank, share_of_voice
 from ideafindr.config import settings
-from ideafindr.report.render import momentum_tag, render
+from ideafindr.report.render import momentum_tag
 from ideafindr.store import db
 
 app = typer.Typer(
@@ -27,16 +24,13 @@ console = Console()
 
 @app.callback()
 def main(ctx: typer.Context) -> None:
-    """Launch the TUI when no subcommand is given.
+    """Launch the web UI when no subcommand is given.
 
-    The TUI is the primary interface; the subcommands remain for scripting and
+    The web UI is the primary interface; the subcommands remain for scripting and
     for anywhere a full-screen app is the wrong shape (CI, pipes, ssh one-liners).
     """
     if ctx.invoked_subcommand is None:
-        settings.ensure_dirs()
-        from ideafindr.tui.app import run as run_tui
-
-        run_tui()
+        web(host=None, port=None)
 
 
 def _setup(verbose: bool) -> None:
@@ -171,8 +165,6 @@ def report(
     try:
         run = db.get_run(con, rid)
         themes = db.load_themes(con, rid)
-        docs = list(db.iter_documents(con, rid))
-        demand_clusters = db.load_demand_clusters(con, rid)
     finally:
         con.close()
 
@@ -194,11 +186,7 @@ def report(
                 console.print(f"[yellow]Summary engine failed:[/] {e}")
                 console.print("[dim]Rendering the report without it.[/]")
 
-    md, html = render(
-        run=run, themes=themes, stats=corpus_stats(docs),
-        language=language_bank(docs), sov=share_of_voice(docs, run.plan.brands),
-        summary=summary, demand=demand_clusters,
-    )
+    md, html = pipeline.render_report(rid, summary=summary)
     console.print(f"\n[green]Report written[/]\n  {md}\n  {html}")
 
 
@@ -327,6 +315,49 @@ def bridge(verbose: bool = typer.Option(False, "-v")) -> None:
 
 
 @app.command()
+def trends(
+    run_id: str = typer.Argument(None, help="Defaults to the most recent run."),
+    verbose: bool = typer.Option(False, "-v"),
+) -> None:
+    """Validate a run's momentum against Google Trends (needs the trends extra)."""
+    _setup(verbose)
+    rid = _resolve_run(run_id)
+    con = db.connect()
+    try:
+        run = db.get_run(con, rid)
+        themes = db.load_themes(con, rid) if run else []
+    finally:
+        con.close()
+    if not run:
+        console.print(f"[red]Unknown run:[/] {rid}")
+        raise typer.Exit(1)
+
+    from ideafindr.analyze.trends import PYTRENDS_AVAILABLE, validate_momentum
+
+    if not PYTRENDS_AVAILABLE:
+        console.print(
+            "[yellow]pytrends is not installed.[/] Install it with:\n"
+            "  uv sync --extra trends\n"
+            "[dim]This command is optional; the report does not need it.[/]"
+        )
+        raise typer.Exit(1)
+
+    # The run's overall momentum: mean across coherent themes, so the search-side
+    # number is compared against what the corpus actually shows.
+    coherent = [t for t in themes if t.coherent] or themes
+    social = sum(t.momentum for t in coherent) / len(coherent) if coherent else 1.0
+    res = validate_momentum(social, [run.topic, *run.plan.keywords[:3]], run.plan.days)
+    console.print(f"topic: [bold]{run.topic}[/]")
+    console.print(
+        f"social momentum {res.get('social_momentum')} · "
+        f"search momentum {res.get('search_momentum')} · "
+        f"alignment {res.get('alignment')} ({res.get('confidence')})"
+    )
+    if note := res.get("note"):
+        console.print(f"[dim]{note}[/]")
+
+
+@app.command()
 def delete(
     run_id: str = typer.Argument(..., help="The run to delete."),
     yes: bool = typer.Option(False, "-y", help="Skip the confirmation."),
@@ -345,18 +376,24 @@ def delete(
     if not yes and not typer.confirm("Delete this run? It cannot be undone.", default=False):
         raise typer.Abort()
 
-    from ideafindr.tui.app import delete_project
-
-    console.print(f"[green]Deleted.[/] {delete_project(run_id)}")
+    console.print(f"[green]Deleted.[/] {pipeline.delete_run(run_id)}")
 
 
 @app.command()
-def tui() -> None:
-    """Open the interactive terminal UI (same as running `ideafindr` bare)."""
+def web(
+    host: str = typer.Option(None, help="Bind address (default 0.0.0.0)."),
+    port: int = typer.Option(None, help="Port (default 8000)."),
+) -> None:
+    """Open the web UI (same as running `ideafindr` bare)."""
     settings.ensure_dirs()
-    from ideafindr.tui.app import run as run_tui
+    from ideafindr.web.app import serve
 
-    run_tui()
+    shown = host or settings.web_host
+    # 0.0.0.0 is a bind address, not a destination; show a navigable URL.
+    if shown in ("0.0.0.0", "::"):
+        shown = "127.0.0.1"
+    console.print(f"ideafindr on [bold]http://{shown}:{port or settings.web_port}[/]  (Ctrl-C to stop)")
+    serve(host=host, port=port)
 
 
 @app.command()

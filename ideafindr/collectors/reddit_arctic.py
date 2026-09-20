@@ -13,7 +13,6 @@ shape this whole collector:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -49,8 +48,11 @@ class ArcticClient:
     def __init__(self, base: str | None = None, rps: float | None = None):
         self.base = (base or settings.arctic_base).rstrip("/")
         self._limiter = AsyncRateLimiter(rps or settings.arctic_rps)
+        # Increased timeout: Arctic Shift can be slow on complex queries
+        # 120s total, with 30s for connect, 60s for pool
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(60.0), headers={"User-Agent": "ideafindr/0.1 (research)"}
+            timeout=httpx.Timeout(120.0, connect=30.0, pool=60.0),
+            headers={"User-Agent": "ideafindr/0.1 (research)"},
         )
 
     async def __aenter__(self) -> "ArcticClient":
@@ -61,8 +63,8 @@ class ArcticClient:
 
     @retry(
         retry=retry_if_exception_type(ArcticTransient),
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=2, min=2, max=30),
+        stop=stop_after_attempt(5),  # Increased from 4 to 5 for reliability
+        wait=wait_exponential(multiplier=2, min=2, max=40),  # Increased max wait to 40s
         reraise=True,
     )
     async def _get_once(self, path: str, params: dict[str, Any]) -> list[dict] | None:
@@ -70,7 +72,17 @@ class ArcticClient:
         itself (as opposed to being busy), which the caller answers by asking for
         a smaller page rather than by waiting."""
         await self._limiter.wait()
-        r = await self._client.get(f"{self.base}{path}", params=params)
+        try:
+            r = await self._client.get(f"{self.base}{path}", params=params)
+        except httpx.ConnectTimeout as e:
+            log.warning("arctic: connect timeout on %s: %s", path, e)
+            raise ArcticTransient(f"connect timeout on {path}")
+        except httpx.ReadTimeout as e:
+            log.warning("arctic: read timeout on %s: %s", path, e)
+            raise ArcticTransient(f"read timeout on {path}")
+        except httpx.HTTPError as e:
+            log.error("arctic: HTTP error on %s: %s", path, e)
+            return []
 
         if r.status_code == 429 or r.status_code >= 500:
             raise ArcticTransient(f"HTTP {r.status_code} on {path}")
@@ -101,11 +113,14 @@ class ArcticClient:
         clean = {k: v for k, v in params.items() if v is not None and v != ""}
         limit = int(clean.get("limit", 0))
 
-        for _ in range(4):
+        for attempt in range(5):  # Increased from 4 to 5
             data = await self._get_once(path, clean)
             if data is not None:
                 return data
             if limit <= 10:
+                if attempt < 4:  # Try one more time at minimum limit before giving up
+                    log.info("arctic: retrying %s at minimum limit=%d (attempt %d/5)", path, limit, attempt + 2)
+                    continue
                 log.warning("arctic query timeout on %s even at limit=%d; giving up",
                             path, limit)
                 return []

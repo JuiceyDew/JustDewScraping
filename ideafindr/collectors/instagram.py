@@ -5,7 +5,8 @@ enabling this for client work.
 
 Practical reality as of 2026: hashtag browsing is login-gated and anonymous
 requests to the public JSON endpoints start returning HTTP 429 after a handful
-of calls from one IP. Expect low yield regardless of effort.
+of calls from one IP. Expect low yield regardless of effort, and never run this
+from more than one account/IP at a time.
 
 Two modes, in descending order of how well they actually work:
 
@@ -15,9 +16,10 @@ Two modes, in descending order of how well they actually work:
   hashtag             -- iterate a hashtag feed. Needs a logged-in session and
       will rate-limit; use a burner account, never a client's.
 
-Session setup (hashtag mode):
-    uv run instaloader --login <user>       # writes a session file
-    INSTAGRAM_SESSION_USER=<user> in .env
+Session setup: enter `sessionid` (and `csrftoken` if you have it) under
+Credentials in the web UI, or export them from the browser. They are stored in
+the state dir, not the repo. The collector also accepts a legacy session file
+written by `instaloader --login <user>`.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import timezone
 
 from ideafindr.config import settings
 from ideafindr.models import Document, RunPlan
@@ -34,6 +36,16 @@ log = logging.getLogger(__name__)
 
 _SHORTCODE = re.compile(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)")
 MAX_COMMENTS = 15
+
+
+def has_session() -> bool:
+    """A usable logged-in session: a sessionid cookie, or a legacy session file."""
+    if settings.instagram_sessionid:
+        return True
+    user = settings.instagram_session_user
+    if user and (settings.sessions_dir / f"session-{user}").exists():
+        return True
+    return bool(user)
 
 
 def _post_to_doc(post, community: str | None = None) -> Document | None:
@@ -63,13 +75,40 @@ def _loader():
         save_metadata=False, compress_json=False, quiet=True,
         dirname_pattern=str(settings.sessions_dir / "ig"),
     )
+
+    # Preferred: a sessionid entered in the web UI. Install the cookies on
+    # instaloader's HTTP session directly, so no `instaloader --login` step is
+    # needed and nothing interactive ever runs.
+    if settings.instagram_sessionid:
+        try:
+            cookies = {"sessionid": settings.instagram_sessionid}
+            if settings.instagram_csrftoken:
+                cookies["csrftoken"] = settings.instagram_csrftoken
+            L.context._session.cookies.update(cookies)
+            # Validate cheaply; a dead session should warn, not explode mid-run.
+            username = L.test_login()
+            if username:
+                L.context.username = username
+                log.info("instagram: using the stored sessionid (user %s)", username)
+            else:
+                log.warning(
+                    "instagram: the stored sessionid was rejected (expired?); "
+                    "falling back to public websearch"
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("instagram: could not load the stored sessionid: %s", e)
+
+    # Fallback: a session file from `instaloader --login <user>`.
     user = settings.instagram_session_user
-    if user:
+    if not L.context.username and user:
         try:
             L.load_session_from_file(user)
-            log.info("instagram: loaded session for %s", user)
+            log.info("instagram: loaded session file for %s", user)
         except FileNotFoundError:
-            log.warning("instagram: no session file for %s; run `instaloader --login %s`", user, user)
+            log.warning(
+                "instagram: no session for %s; run `instaloader --login %s` or "
+                "enter a sessionid in the web UI", user, user,
+            )
     return L
 
 

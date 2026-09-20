@@ -33,7 +33,6 @@ import asyncio
 import logging
 import re
 from datetime import datetime, timezone
-from hashlib import sha1
 
 from ideafindr.collectors.base import is_on_topic, topic_terms
 from ideafindr.models import Document, RunPlan
