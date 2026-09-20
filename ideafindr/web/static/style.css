@@ -35,11 +35,12 @@ a { color: var(--accent); }
   padding: 16px 18px; margin: 12px 0;
 }
 label { display: block; margin: 10px 0; }
-label > input, label > select {
+label > input, label > select, label > textarea {
   display: block; width: 100%; margin-top: 4px; padding: 7px 9px;
   background: var(--bg); color: var(--fg);
   border: 1px solid var(--line); border-radius: 6px; font: inherit;
 }
+label > textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; resize: vertical; }
 label.chk { display: flex; align-items: center; gap: 8px; }
 label.chk input { width: auto; margin: 0; }
 fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 12px 0; padding: 8px 12px; }
@@ -51,6 +52,11 @@ button {
 }
 button:hover { border-color: var(--accent); color: var(--accent); }
 button.danger { color: var(--err); }
+button.linklike {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--muted); font: inherit;
+}
+button.linklike:hover { color: var(--accent); }
 form.inline { display: inline; }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .meta { color: var(--muted); font-size: .84rem; }

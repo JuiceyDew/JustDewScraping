@@ -12,6 +12,10 @@
   <span class="spacer"></span>
   <a href="/settings">Settings</a>
   <a href="/credentials">Credentials</a>
+  {% if auth_enabled() %}
+  <form method="post" action="/logout" class="inline" style="display:inline">
+    <button class="linklike">Log out</button></form>
+  {% endif %}
 </nav>
 <main>
 {% block body %}{% endblock %}

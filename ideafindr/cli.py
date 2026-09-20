@@ -380,6 +380,34 @@ def delete(
 
 
 @app.command()
+def passwd(
+    password: str = typer.Option(
+        None, "--password", "-p",
+        help="Set non-interactively (for scripts); omit to be prompted.",
+    ),
+    disable: bool = typer.Option(False, "--disable", help="Remove the password and open the UI."),
+) -> None:
+    """Set (or clear) the password that gates the web UI."""
+    from ideafindr.state import load_overrides, save_overrides
+
+    if disable:
+        save_overrides({"auth_password": ""})
+        console.print("[green]Password cleared.[/] The web UI is now open to anyone who can reach it.")
+        return
+
+    if password is None:
+        password = typer.prompt("New password", hide_input=True, confirmation_prompt=True)
+    if not password.strip():
+        console.print("[red]Empty password.[/] Use --disable to remove the gate deliberately.")
+        raise typer.Exit(1)
+
+    save_overrides({"auth_password": password})
+    console.print("[green]Password set.[/] Stored in settings.json (mode 0600).")
+    console.print("[dim]Restart the service for a systemd deployment to pick it up: "
+                  "systemctl restart ideafindr[/]")
+
+
+@app.command()
 def web(
     host: str = typer.Option(None, help="Bind address (default 0.0.0.0)."),
     port: int = typer.Option(None, help="Port (default 8000)."),

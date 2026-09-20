@@ -60,6 +60,8 @@ EDITABLE: frozenset[str] = frozenset({
     # web UI bind (takes effect on restart)
     "web_host",
     "web_port",
+    # web UI password (empty disables the login gate)
+    "auth_password",
 })
 
 # The subset that must never be rendered back to a page or written to a log.
@@ -72,6 +74,7 @@ SECRET: frozenset[str] = frozenset({
     "instagram_sessionid",
     "instagram_csrftoken",
     "tiktok_ms_token",
+    "auth_password",
 })
 
 

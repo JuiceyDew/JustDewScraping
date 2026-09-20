@@ -11,8 +11,8 @@ analysis layer (theme clustering, momentum, share of voice, language bank) and
 synthesis. Chat goes to **Ollama Cloud**; embeddings are a hosted provider or
 in-process TF-IDF.
 
-The interface is a small **local web UI** (no build step, no CDN, no app auth),
-served from a Nix flake for a homelab.
+The interface is a small **local web UI** (no build step, no CDN), with a
+single-password login gate, served from a Nix flake for a homelab.
 
 ```
 ideafindr              # serves http://0.0.0.0:8000 (reachable on the LAN)
@@ -86,12 +86,30 @@ Run `uv run ideafindr doctor` to probe every external dependency.
 
 ## Credentials
 
-The UI has no authentication and holds API keys and live session cookies. It
-binds `0.0.0.0:8000` (`WEB_HOST`/`WEB_PORT`, or `ideafindr web --host`) so it is
-reachable on the LAN — but anyone on that network can start a run, read the
-Settings/Credentials pages, or delete projects. **Restrict the firewall to your
-subnet, or put a VPN / authenticating reverse proxy in front of it.** The
-retriever bridge stays on `127.0.0.1`. It stores nothing in the repository.
+The UI has no user accounts, but it does have a **single-password login gate**
+so a headless server is not wide open on the LAN. It binds `0.0.0.0:8000`
+(`WEB_HOST`/`WEB_PORT`, or `ideafindr web --host`); anyone who can reach that
+port sees the login page until they authenticate. The retriever bridge stays on
+`127.0.0.1`. Nothing is stored in the repository.
+
+### Setting the password
+
+```bash
+uv run ideafindr passwd              # prompts twice, stores it 0600
+uv run ideafindr passwd --disable    # remove the gate
+```
+
+Or set `AUTH_PASSWORD` in the environment, or set it on the Settings page once
+logged in. Precedence is the same as every other setting: the real environment
+wins, so a `systemd` `Environment=`/`EnvironmentFile` (or the NixOS module's
+`authPasswordFile`) beats whatever the UI stored. When no password is set the
+gate is off and the UI behaves exactly as before — fine for a single-user
+laptop, not for a shared LAN.
+
+> **This is a LAN gate, not internet-grade auth.** The password crosses plain
+> HTTP in clear text. Before exposing the service beyond a trusted subnet, put
+> TLS in front (a reverse proxy, or WireGuard/Tailscale). The session cookie is
+> signed, HttpOnly and SameSite=Lax, so it cannot be forged or read by scripts.
 
 ### Getting cookies: one paste
 
@@ -260,14 +278,19 @@ services.ideafindr = {
   host = "0.0.0.0";     # reachable on the LAN
   port = 8000;
   openFirewall = true;  # opens only `port`; restrict it to your subnet
+  # A single password gates the UI. Kept out of the Nix store via a credential:
+  authPasswordFile = "/run/secrets/ideafindr-password";
   # stateDir defaults to /var/lib/ideafindr (systemd StateDirectory, mode 0700)
   # environmentFile = /run/secrets/ideafindr.env;  # optional, overrides the UI
 };
-
-# If the service should reach a local Ollama (see the Local models section).
-# The service runs as the `ideafindr` user, so nothing else is needed when
-# Ollama listens on 127.0.0.1:11434.
 ```
+
+`authPasswordFile` is read into `AUTH_PASSWORD` with systemd `LoadCredential`, so
+the password never lands in the world-readable Nix store. Leave it unset and the
+UI is open — do that only on a trusted subnet.
+
+The service runs as the `ideafindr` user, so a local Ollama on
+`127.0.0.1:11434` needs no extra configuration (see the Local models section).
 
 Apply it:
 

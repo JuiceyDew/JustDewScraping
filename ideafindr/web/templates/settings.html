@@ -42,6 +42,17 @@
   <label class="chk"><input type="checkbox" name="enable_instagram" value="1"
     {% if s.enable_instagram %}checked{% endif %}> Enable Instagram (ToS-risky)</label>
 
+  <h3>Access</h3>
+  <p class="meta">
+    One password gates the whole UI. Leave blank to keep the current password;
+    set <code>AUTH_PASSWORD</code> in the environment (the NixOS
+    <code>environmentFile</code> is cleanest) to manage it outside the UI.
+  </p>
+  <label>Password
+    <input name="auth_password" type="password"
+      placeholder="{{ '•••••••• (set)' if secret_flags.auth_password else 'open UI (no password)' }}">
+  </label>
+
   <button type="submit">Save</button>
 </form>
 {% endblock %}

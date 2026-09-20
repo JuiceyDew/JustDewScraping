@@ -138,6 +138,15 @@ class Settings(BaseSettings):
     web_host: str = "0.0.0.0"
     web_port: int = 8000
 
+    # --- web auth -------------------------------------------------------------
+    # One password gates the whole UI. Empty disables the gate (the default, so
+    # development and the offline tests are unaffected). Set AUTH_PASSWORD in the
+    # environment -- the NixOS module's environmentFile is the clean way -- or via
+    # `ideafindr passwd` / the Settings page once logged in. See web/auth.py.
+    # This is a LAN gate, not internet-grade auth: put TLS in front before
+    # exposing it, or the password crosses the wire in clear text.
+    auth_password: str = ""
+
     # --- bridge ---------------------------------------------------------------
     # Stays on localhost: it serves the raw scraped corpus to gpt-researcher and
     # has no business being reachable from the network. Do not widen this.

@@ -156,6 +156,19 @@
           '';
         };
 
+        authPasswordFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          example = "/run/secrets/ideafindr-password";
+          description = ''
+            File containing the single password that gates the web UI, so it is
+            kept out of the Nix store. Loaded with systemd `LoadCredential`, and
+            read by `auth_password` at startup. When null the UI is open to
+            anyone who can reach `port` -- set this (or `auth_password` in the UI)
+            before exposing the service beyond a trusted subnet.
+          '';
+        };
+
         openFirewall = lib.mkOption {
           type = lib.types.bool;
           default = false;
@@ -215,6 +228,21 @@
             # systemd's default (90s) SIGTERM timeout is far longer than the
             # server needs to stop; don't make a restart wait on it.
             TimeoutStopSec = 15;
+          }
+          // lib.optionalAttrs (cfg.authPasswordFile != null) {
+            # The password is delivered as a systemd credential, kept out of the
+            # Nix store and the environment of unrelated processes. The wrapper
+            # reads it into AUTH_PASSWORD, which settings.py picks up.
+            LoadCredential = "auth-password:${cfg.authPasswordFile}";
+            ExecStart = lib.mkForce (
+              pkgs.writeShellScript "ideafindr-serve" ''
+                if [ -r "$CREDENTIALS_DIRECTORY/auth-password" ]; then
+                  AUTH_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/auth-password")"
+                  export AUTH_PASSWORD
+                fi
+                exec ${cfg.package}/bin/ideafindr web --host ${cfg.host} --port ${toString cfg.port}
+              ''
+            );
           };
         };
       };

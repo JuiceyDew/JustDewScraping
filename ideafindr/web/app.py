@@ -5,11 +5,12 @@ one small stylesheet. No build step, no CDN, and no client-side secret handling:
 all values that could be scraped or forged are escaped by Jinja's autoescape, and
 secrets are never sent back to the browser.
 
-This is a single-user tool meant for a LAN or VPN-reachable homelab -- there is
-no app auth by design. It binds 0.0.0.0 (web_host) so it is reachable on the LAN;
-keep the network in front of it trusted, or front it with a VPN/authenticating
-proxy, and restrict the firewall to your subnet. Override with `web_host` or
-`ideafindr web --host`.
+This is a single-user tool meant for a LAN or VPN-reachable homelab. It binds
+0.0.0.0 (web_host) so it is reachable on the LAN, and is gated by one password
+when `auth_password`/`AUTH_PASSWORD` is set (see ideafindr/web/auth.py). With no
+password set the UI is open -- fine on a laptop, not on a shared network. Override
+the bind with `web_host` or `ideafindr web --host`; put TLS in front before
+exposing it beyond a trusted subnet, since the password crosses plain HTTP.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from ideafindr.state import (
     secret_is_set,
 )
 from ideafindr.store import db
-from ideafindr.web import browsercookies, jobs
+from ideafindr.web import auth, browsercookies, jobs
 from ideafindr.web.cookies import parse_cookie_input
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,30 @@ templates = Jinja2Templates(directory=str(HERE / "templates"))
 
 app = FastAPI(title="ideafindr")
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
+
+# Evaluated at render time so the nav reflects the current config without every
+# route having to pass a flag.
+templates.env.globals["auth_enabled"] = auth.enabled
+
+# Paths reachable without a session when the login gate is on: the login page
+# itself, the health probe, and static assets. Everything else redirects.
+_OPEN_PATHS = {"/login", "/health"}
+
+
+@app.middleware("http")
+async def _require_login(request: Request, call_next):
+    """Gate the whole UI behind one password when auth_password is set.
+
+    A homelab server is often headless and on a shared LAN, so an unauthenticated
+    0.0.0.0 bind exposes the API key, session cookies and delete routes. This is
+    deliberately simple -- one password, a signed cookie -- not multi-user auth.
+    """
+    if auth.enabled():
+        path = request.url.path
+        if path not in _OPEN_PATHS and not path.startswith("/static/"):
+            if not auth.valid_token(request.cookies.get(auth.COOKIE)):
+                return RedirectResponse(f"/login?next={path}", status_code=303)
+    return await call_next(request)
 
 STANCE_LABEL = {
     "pain_point": "Pain point", "desire": "Desire", "objection": "Objection",
@@ -178,6 +203,47 @@ def _topic(run_id: str) -> str:
         return run.topic if run else run_id
     finally:
         con.close()
+
+
+# --- auth -----------------------------------------------------------------------
+
+
+def _safe_next(target: str) -> str:
+    """Only allow same-site relative redirects, never an open redirect."""
+    if target.startswith("/") and not target.startswith("//"):
+        return target
+    return "/"
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, next: str = "/", error: int = 0):
+    if not auth.enabled():
+        return RedirectResponse(_safe_next(next), status_code=303)
+    return templates.TemplateResponse(
+        request, "login.html", {"next": _safe_next(next), "error": bool(error)}
+    )
+
+
+@app.post("/login")
+def login(password: str = Form(""), next: str = Form("/")):
+    target = _safe_next(next)
+    if not auth.check_password(password):
+        return RedirectResponse(f"/login?error=1&next={target}", status_code=303)
+    resp = RedirectResponse(target, status_code=303)
+    resp.set_cookie(
+        auth.COOKIE, auth.make_token(), max_age=auth.SESSION_TTL,
+        httponly=True, samesite="lax",
+        # secure=True would be right behind TLS; the default deployment is plain
+        # HTTP on a LAN, so leave it off or the cookie is dropped entirely.
+    )
+    return resp
+
+
+@app.post("/logout")
+def logout():
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie(auth.COOKIE)
+    return resp
 
 
 # --- settings -------------------------------------------------------------------
