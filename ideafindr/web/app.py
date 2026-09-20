@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -115,7 +115,7 @@ def research(
     topic = topic.strip()
     if not topic:
         raise HTTPException(400, "topic is required")
-    srcs = [s for s in sources if s in pipeline.ALL_SOURCES] or ["reddit", "web", "bluesky"]
+    srcs = [s for s in sources if s in pipeline.ALL_SOURCES] or ["reddit", "dork", "web", "bluesky"]
     job = jobs.start_research(topic, days, srcs)
     return RedirectResponse(f"/research/{job.id}", status_code=303)
 
@@ -354,6 +354,41 @@ def credentials_instagram_paste(cookies: str = Form("")):
         "instagram_sessionid": session,
         "instagram_csrftoken": got.get("csrftoken", ""),
     })
+    apply_overrides(settings)
+    return RedirectResponse("/credentials?saved=1", status_code=303)
+
+
+@app.post("/credentials/instagram/session")
+async def credentials_instagram_session(
+    username: str = Form(""),
+    session_file: UploadFile = File(...),
+):
+    """Upload an `instaloader --login` session file.
+
+    Session files "usually do not expire" (instaloader docs), so this is more
+    durable than re-pasting a sessionid. Written to the state dir as
+    `session-<username>`, which the collector already reads (instagram.py).
+    """
+    user = username.strip().lstrip("@")
+    if not user:
+        return RedirectResponse(
+            "/credentials?error=Instagram+username+is+required+for+a+session+file.",
+            status_code=303,
+        )
+    data = await session_file.read()
+    if not data.strip():
+        return RedirectResponse(
+            "/credentials?error=The+uploaded+session+file+was+empty.",
+            status_code=303,
+        )
+    settings.sessions_dir.mkdir(parents=True, exist_ok=True)
+    path = settings.sessions_dir / f"session-{user}"
+    path.write_bytes(data)
+    try:
+        path.chmod(0o600)  # it is a live session credential
+    except OSError:  # pragma: no cover - non-POSIX filesystems
+        pass
+    save_overrides({"instagram_session_user": user})
     apply_overrides(settings)
     return RedirectResponse("/credentials?saved=1", status_code=303)
 

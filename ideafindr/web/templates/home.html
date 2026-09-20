@@ -34,7 +34,7 @@
         {% for s in sources %}
         <label class="chk">
           <input type="checkbox" name="sources" value="{{ s }}"
-            {% if s in ('reddit','web','bluesky') %}checked{% endif %}>
+            {% if s in ('reddit','dork','web','bluesky') %}checked{% endif %}>
           {{ s }}
         </label>
         {% endfor %}

@@ -17,6 +17,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("IDEAFINDR_STATE_DIR", str(tmp_path))
     monkeypatch.setattr(cfg.settings, "db_path", tmp_path / "t.db")
     monkeypatch.setattr(cfg.settings, "reports_dir", tmp_path / "reports")
+    monkeypatch.setattr(cfg.settings, "sessions_dir", tmp_path / "sessions")
     return TestClient(webapp.app)
 
 
@@ -101,6 +102,33 @@ def test_instagram_paste_header_is_parsed(client):
     stored = load_overrides()
     assert stored["instagram_sessionid"] == "ig-123"
     assert stored["instagram_csrftoken"] == "ig-csrf"
+
+
+def test_instagram_session_file_upload(client, tmp_path):
+    """An instaloader session file lands under sessions/ and selects the user."""
+    from ideafindr.state import load_overrides
+
+    r = client.post(
+        "/credentials/instagram/session",
+        data={"username": "@burner"},
+        files={"session_file": ("session-burner", b"session data", "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert load_overrides()["instagram_session_user"] == "burner"  # @ stripped
+    saved = tmp_path / "sessions" / "session-burner"
+    assert saved.exists() and saved.read_bytes() == b"session data"
+
+
+def test_instagram_session_upload_needs_username(client):
+    r = client.post(
+        "/credentials/instagram/session",
+        data={"username": ""},
+        files={"session_file": ("s", b"data", "application/octet-stream")},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert "error=" in r.headers["location"]
 
 
 def test_import_without_browser_reports_error_not_500(client, monkeypatch):

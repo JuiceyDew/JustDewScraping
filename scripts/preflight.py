@@ -178,6 +178,27 @@ def probe_embedder() -> None:
         report("embeddings backend", False, repr(e)[:70])
 
 
+def probe_credentials() -> None:
+    """Live-check the optional cookie/credential sources.
+
+    None of these is required for a report, so an unconfigured or expired
+    session is a WARN, never a blocking failure. The point is to distinguish
+    "the cookie died" from "nobody is talking about this".
+    """
+    from ideafindr.collectors import health
+
+    for name, fn in (
+        ("x: session", health.probe_x),
+        ("instagram: session", health.probe_instagram),
+        ("reddit: transport", health.probe_reddit),
+    ):
+        try:
+            ok, detail = fn()
+            report(name, ok, detail, warn=not ok)
+        except Exception as e:  # noqa: BLE001
+            report(name, False, repr(e)[:70], warn=True)
+
+
 if __name__ == "__main__":
     print("\n=== Arctic Shift (Reddit) ===")
     probe_arctic()
@@ -186,6 +207,8 @@ if __name__ == "__main__":
     print("\n=== Embeddings ===")
     probe_provider()
     probe_embedder()
+    print("\n=== Credentials (optional) ===")
+    probe_credentials()
 
     hard = ["arctic: subreddits/search", "arctic: posts/search"]
     failed = [k for k in hard if not results.get(k)]

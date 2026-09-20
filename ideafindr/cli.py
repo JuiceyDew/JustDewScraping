@@ -117,7 +117,7 @@ def plan(
 def collect(
     topic: str,
     days: int = typer.Option(180),
-    sources: str = typer.Option("reddit,web", help="Comma-separated: reddit,web,tiktok,instagram"),
+    sources: str = typer.Option("reddit,dork,web", help="Comma-separated: reddit,dork,web,tiktok,instagram"),
     limit: int = typer.Option(600, help="Rough cap on documents collected."),
     yes: bool = typer.Option(False, "-y", help="Skip plan confirmation."),
     verbose: bool = typer.Option(False, "-v"),
@@ -194,7 +194,7 @@ def report(
 def research(
     topic: str,
     days: int = typer.Option(180),
-    sources: str = typer.Option("reddit,web"),
+    sources: str = typer.Option("reddit,dork,web"),
     limit: int = typer.Option(600),
     clusters: int = typer.Option(None, "--clusters", "-k"),
     engine: str = typer.Option("none", help="Executive summary engine: gpt-researcher | none"),
@@ -422,6 +422,33 @@ def web(
         shown = "127.0.0.1"
     console.print(f"ideafindr on [bold]http://{shown}:{port or settings.web_port}[/]  (Ctrl-C to stop)")
     serve(host=host, port=port)
+
+
+@app.command()
+def accounts() -> None:
+    """Check the optional X / Instagram / Reddit credentials for expiry."""
+    _setup(False)
+    from ideafindr.collectors import health
+
+    t = Table(header_style="bold")
+    t.add_column("Source"); t.add_column("Status"); t.add_column("Detail")
+    for name, fn in (
+        ("x", health.probe_x),
+        ("instagram", health.probe_instagram),
+        ("reddit", health.probe_reddit),
+    ):
+        try:
+            ok, detail = fn()
+        except Exception as e:  # noqa: BLE001
+            ok, detail = False, repr(e)[:70]
+        mark = "[green]ok[/]" if ok else "[yellow]—[/]"
+        t.add_row(name, mark, detail)
+    console.print(t)
+    console.print(
+        "[dim]These sources are optional. A dead session degrades the corpus "
+        "instead of failing the run, so check here before wondering why a "
+        "source returned nothing.[/]"
+    )
 
 
 @app.command()

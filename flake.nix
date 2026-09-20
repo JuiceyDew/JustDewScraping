@@ -101,6 +101,16 @@
       ...
     }: let
       cfg = config.services.ideafindr;
+
+      # Fold the authPasswordFile shorthand into the generic credential map,
+      # without letting it override an explicit credentials.AUTH_PASSWORD.
+      credentials =
+        lib.filterAttrs (_: v: v != null) cfg.credentials
+        // lib.optionalAttrs (!(cfg.credentials ? AUTH_PASSWORD) && cfg.authPasswordFile != null) {
+          AUTH_PASSWORD = cfg.authPasswordFile;
+        };
+      credentialLines = lib.mapAttrsToList (name: path: "${name}:${path}") credentials;
+      credentialNames = lib.attrNames credentials;
     in {
       options.services.ideafindr = {
         enable = lib.mkEnableOption "ideafindr web UI";
@@ -162,10 +172,35 @@
           example = "/run/secrets/ideafindr-password";
           description = ''
             File containing the single password that gates the web UI, so it is
-            kept out of the Nix store. Loaded with systemd `LoadCredential`, and
-            read by `auth_password` at startup. When null the UI is open to
+            kept out of the Nix store. Shorthand for
+            `credentials.AUTH_PASSWORD`. Loaded with systemd `LoadCredential`,
+            and read by `auth_password` at startup. When null the UI is open to
             anyone who can reach `port` -- set this (or `auth_password` in the UI)
             before exposing the service beyond a trusted subnet.
+          '';
+        };
+
+        credentials = lib.mkOption {
+          type = lib.types.attrsOf lib.types.path;
+          default = {};
+          example = {
+            OLLAMA_API_KEY = "/run/secrets/ideafindr-ollama-key";
+            X_AUTH_TOKEN = "/run/secrets/ideafindr-x-auth-token";
+            X_CT0 = "/run/secrets/ideafindr-x-ct0";
+            INSTAGRAM_SESSIONID = "/run/secrets/ideafindr-ig-sessionid";
+            REDDIT_CLIENT_ID = "/run/secrets/ideafindr-reddit-id";
+            REDDIT_CLIENT_SECRET = "/run/secrets/ideafindr-reddit-secret";
+          };
+          description = ''
+            Secrets delivered to the service as systemd credentials, mapped
+            `ENV_VAR_NAME = path-to-file`. Each file is read into the matching
+            environment variable (e.g. `X_AUTH_TOKEN`), so the value never lands
+            in the world-readable Nix store and the UI is not the only way to
+            configure a headless box. These take precedence over anything stored
+            in the web UI, matching the usual environment-over-settings rule.
+
+            The keys are the pydantic field names upper-cased, which is exactly
+            what `ideafindr/config.py` reads from the environment.
           '';
         };
 
@@ -229,17 +264,18 @@
             # server needs to stop; don't make a restart wait on it.
             TimeoutStopSec = 15;
           }
-          // lib.optionalAttrs (cfg.authPasswordFile != null) {
-            # The password is delivered as a systemd credential, kept out of the
-            # Nix store and the environment of unrelated processes. The wrapper
-            # reads it into AUTH_PASSWORD, which settings.py picks up.
-            LoadCredential = "auth-password:${cfg.authPasswordFile}";
+          // lib.optionalAttrs (credentials != {}) {
+            # Deliver each secret as a systemd credential and read it into the
+            # matching environment variable. Kept out of the Nix store, and out
+            # of the environment of every unrelated process.
+            LoadCredential = credentialLines;
             ExecStart = lib.mkForce (
               pkgs.writeShellScript "ideafindr-serve" ''
-                if [ -r "$CREDENTIALS_DIRECTORY/auth-password" ]; then
-                  AUTH_PASSWORD="$(cat "$CREDENTIALS_DIRECTORY/auth-password")"
-                  export AUTH_PASSWORD
-                fi
+                ${lib.concatMapStrings (name: ''
+                  if [ -r "$CREDENTIALS_DIRECTORY/${name}" ]; then
+                    export ${name}="$(cat "$CREDENTIALS_DIRECTORY/${name}")"
+                  fi
+                '') credentialNames}
                 exec ${cfg.package}/bin/ideafindr web --host ${cfg.host} --port ${toString cfg.port}
               ''
             );

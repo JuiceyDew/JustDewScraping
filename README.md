@@ -146,21 +146,62 @@ Only useful when the server and the browser are the same machine. On Linux,
 **Firefox** cookies decrypt without an external keyring; Chromium-family reads
 need the OS keyring, which a headless systemd service may not have unlocked.
 
+#### Instagram: the durable way
+
+A pasted `sessionid` works but expires. Instaloader's docs say session files
+"usually do not expire", so prefer one for anything long-lived. On any machine
+with a browser:
+
+```bash
+pip install instaloader
+instaloader --login <burner-account>     # writes ./session-<burner-account>
+```
+
+Then upload that `session-<burner-account>` file on the Credentials page under
+**Instagram → upload an instaloader session file** (it is saved to
+`<state-dir>/sessions/`), or copy it there yourself and set
+`INSTAGRAM_SESSION_USER`. Instagram is still login-gated and rate-limits hard —
+expect low yield and never run it from more than one account/IP.
+
+> Instagram needs the optional scraper: `uv sync --extra scrapers`. It is not in
+> the default install or the NixOS package.
+
+### Check your sessions
+
+A dead cookie does not fail a run — the collector returns zero documents, which
+looks identical to "nobody is talking about this". Before debugging a thin
+corpus, check the credentials:
+
+```bash
+uv run ideafindr accounts     # X / Instagram / Reddit status + expiry
+uv run ideafindr doctor       # the same checks alongside the other probes
+```
+
+Both are non-blocking: an unconfigured or expired source is a warning, not a
+failure.
+
 ### Reddit access
 
 Reddit's own API is ~50× faster than Arctic Shift and does not time out, and the
 collector is written and tested. But credentials are no longer self-service:
 Reddit's [Responsible Builder Policy](https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy)
-(November 2025) closed instant signup, and the policy prohibits commercial
-resale of Reddit data. Without credentials, `--sources reddit` uses Arctic Shift.
-Three sources need no permission:
+requires approval for *all* API access, keeps the free tier non-commercial, and
+prohibits commercial resale of Reddit data without written permission. So the
+default is **not** the official API.
+
+Instead, the default sources pair the free archive with a search-engine route:
 
 | source | what it gets |
 |---|---|
-| `dork` | Reddit threads via `site:reddit.com` search snippets — never contacts Reddit |
+| `reddit` | Arctic Shift, the free public archive — times out on some keyword queries |
+| `dork` | the same threads via `site:reddit.com` search snippets — never contacts Reddit, so it cannot be throttled |
 | `hackernews` | free, no key, officially provided via Algolia; technical skew |
 | `lemmy` | federated and free; in practice only worth it for tech topics |
 | `stackexchange` | free, 300 requests/day; the planner picks the sites |
+
+If you are non-commercial and get approved, put `REDDIT_CLIENT_ID` /
+`REDDIT_CLIENT_SECRET` in the environment (or the Credentials page) and the
+collector switches to the official API automatically.
 
 ---
 
@@ -288,6 +329,24 @@ services.ideafindr = {
 `authPasswordFile` is read into `AUTH_PASSWORD` with systemd `LoadCredential`, so
 the password never lands in the world-readable Nix store. Leave it unset and the
 UI is open — do that only on a trusted subnet.
+
+For a headless box, deliver every secret the same way instead of typing it into
+the UI:
+
+```nix
+services.ideafindr.credentials = {
+  OLLAMA_API_KEY       = "/run/secrets/ideafindr-ollama-key";
+  X_AUTH_TOKEN         = "/run/secrets/ideafindr-x-auth-token";
+  X_CT0                = "/run/secrets/ideafindr-x-ct0";
+  INSTAGRAM_SESSIONID  = "/run/secrets/ideafindr-ig-sessionid";
+  REDDIT_CLIENT_SECRET = "/run/secrets/ideafindr-reddit-secret";
+};
+```
+
+Each file is loaded with `LoadCredential` and read into the matching environment
+variable (`X_AUTH_TOKEN`, etc.), which `config.py` picks up. Environment values
+override anything stored in the web UI, so Nix stays the source of truth. The
+key names are the pydantic field names upper-cased.
 
 The service runs as the `ideafindr` user, so a local Ollama on
 `127.0.0.1:11434` needs no extra configuration (see the Local models section).
