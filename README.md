@@ -220,29 +220,71 @@ recent volume, which would just track how much was collected.
 
 ## Nix
 
-The repo is a flake: a package, a dev shell, and a NixOS module.
+The repo is a flake: a package, a dev shell, and a NixOS module that runs the UI
+as a hardened systemd service.
+
+### Run it as a service (NixOS homelab)
+
+Add the flake as an input and import the module:
 
 ```nix
+# /etc/nixos/flake.nix
 {
   inputs.ideafindr.url = "github:JuiceyDew/JustDewScraping";
 
-  services.ideafindr = {
-    enable = true;
-    host = "0.0.0.0";     # bind all interfaces to reach it from the LAN
-    port = 8000;
-    openFirewall = true;  # opens only `port`; restrict to your subnet if needed
-    # stateDir defaults to /var/lib/ideafindr (systemd StateDirectory, mode 0700)
+  outputs = { self, nixpkgs, ideafindr, ... }: {
+    nixosConfigurations.yourhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        ./configuration.nix
+        ideafindr.nixosModules.default
+      ];
+    };
   };
 }
 ```
 
-The module runs a hardened systemd service with `IDEAFINDR_STATE_DIR` pointed at
-its `StateDirectory`. **The Ollama key is not configured in Nix** — enter it in
-the web UI and it is stored under the state directory. An `environmentFile` is
-supported for anything you would rather set declaratively; the real environment
-overrides the UI.
+Then, in `configuration.nix`:
 
-To build from a checkout:
+```nix
+services.ideafindr = {
+  enable = true;
+  host = "0.0.0.0";     # reachable on the LAN
+  port = 8000;
+  openFirewall = true;  # opens only `port`; restrict it to your subnet
+  # stateDir defaults to /var/lib/ideafindr (systemd StateDirectory, mode 0700)
+  # environmentFile = /run/secrets/ideafindr.env;  # optional, overrides the UI
+};
+
+# If the service should reach a local Ollama (see the Local models section).
+# The service runs as the `ideafindr` user, so nothing else is needed when
+# Ollama listens on 127.0.0.1:11434.
+```
+
+Apply it:
+
+```bash
+sudo nixos-rebuild switch --flake /etc/nixos#yourhost
+```
+
+Manage it like any other unit:
+
+```bash
+systemctl status ideafindr
+journalctl -u ideafindr -f
+systemctl restart ideafindr
+```
+
+The service restarts on failure and starts on boot. It runs as the unprivileged
+`ideafindr` user with `ProtectSystem=strict` and only its state directory
+writable; the database, reports and `settings.json` (the API key and session
+cookies entered in the UI) live under `stateDir` and survive rebuilds.
+
+**The Ollama key is not configured in Nix** — enter it in the web UI and it is
+stored under the state directory. An `environmentFile` is supported for anything
+you would rather set declaratively (e.g. `OLLAMA_BASE_URL`); the real
+environment overrides the UI.
+
+### Build from a checkout
 
 ```bash
 git clone git@github.com:JuiceyDew/JustDewScraping.git

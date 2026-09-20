@@ -130,7 +130,11 @@
         stateDir = lib.mkOption {
           type = lib.types.path;
           default = "/var/lib/ideafindr";
-          description = "Where the database, reports and settings live.";
+          description = ''
+            Where the database, reports and settings live. Realised as a systemd
+            `StateDirectory` owned by `user`/`group`, so it is created on first
+            start and keeps the secrets it holds private.
+          '';
         };
 
         user = lib.mkOption {
@@ -174,7 +178,10 @@
           after = ["network-online.target"];
           wants = ["network-online.target"];
 
-          environment.IDEAFINDR_STATE_DIR = cfg.stateDir;
+          # `%S` expands to the state root that matches StateDirectory. Deriving
+          # the path here rather than hardcoding cfg.stateDir keeps the two in
+          # sync if an operator changes stateDir to something outside /var/lib.
+          environment.IDEAFINDR_STATE_DIR = "%S/ideafindr";
 
           serviceConfig = {
             ExecStart = "${cfg.package}/bin/ideafindr web --host ${cfg.host} --port ${toString cfg.port}";
@@ -184,6 +191,10 @@
             StateDirectory = "ideafindr";
             StateDirectoryMode = "0700";
             WorkingDirectory = cfg.stateDir;
+
+            # A homelab UI that stays up across reboots and transient failures.
+            Restart = "on-failure";
+            RestartSec = 10;
 
             # Hardening: the service needs only its own state dir and network.
             NoNewPrivileges = true;
@@ -200,6 +211,10 @@
             RestrictRealtime = true;
             SystemCallArchitectures = "native";
             ReadWritePaths = [cfg.stateDir];
+
+            # systemd's default (90s) SIGTERM timeout is far longer than the
+            # server needs to stop; don't make a restart wait on it.
+            TimeoutStopSec = 15;
           };
         };
       };
