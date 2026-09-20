@@ -56,10 +56,21 @@ corpus in the exact shape gpt-researcher's `RETRIEVER=custom` expects —
 
 ## Quick start
 
+Requires [uv](https://docs.astral.sh/uv/) and Python 3.12.
+
 ```bash
+git clone git@github.com:JuiceyDew/JustDewScraping.git
+cd JustDewScraping
+
 uv sync --extra dev
 cp .env.example .env
-uv run ideafindr            # opens the web UI
+uv run ideafindr web        # serves http://0.0.0.0:8000
+```
+
+HTTPS works too if you have not set up an SSH key:
+
+```bash
+git clone https://github.com/JuiceyDew/JustDewScraping.git
 ```
 
 Then, in the UI:
@@ -213,7 +224,7 @@ The repo is a flake: a package, a dev shell, and a NixOS module.
 
 ```nix
 {
-  inputs.ideafindr.url = "github:you/ideafindr";
+  inputs.ideafindr.url = "github:JuiceyDew/JustDewScraping";
 
   services.ideafindr = {
     enable = true;
@@ -231,10 +242,21 @@ the web UI and it is stored under the state directory. An `environmentFile` is
 supported for anything you would rather set declaratively; the real environment
 overrides the UI.
 
+To build from a checkout:
+
 ```bash
+git clone git@github.com:JuiceyDew/JustDewScraping.git
+cd JustDewScraping
+
 nix develop        # dev shell with the test and optional-collector extras
 nix build          # the package
 nix run . -- --help
+```
+
+Or run the flake directly without cloning:
+
+```bash
+nix run github:JuiceyDew/JustDewScraping -- --help
 ```
 
 Verified on x86_64-linux: `nix flake check`, `nix build`, and the packaged web
