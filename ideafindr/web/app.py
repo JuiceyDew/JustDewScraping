@@ -36,6 +36,7 @@ from ideafindr.state import (
 )
 from ideafindr.store import db
 from ideafindr.web import browsercookies, jobs
+from ideafindr.web.cookies import parse_cookie_input
 
 log = logging.getLogger(__name__)
 
@@ -241,11 +242,51 @@ def credentials_x(auth_token: str = Form(""), ct0: str = Form("")):
     return RedirectResponse("/credentials?saved=1", status_code=303)
 
 
+@app.post("/credentials/x/paste")
+def credentials_x_paste(cookies: str = Form("")):
+    """One-paste path: accept the whole browser `Cookie:` header.
+
+    On a LAN the browser is on another machine, so `import from browser` (which
+    reads the server's browser) cannot help, and `auth_token` is HttpOnly so the
+    console cannot show it. The Cookie request header is the single copy that
+    contains everything.
+    """
+    got = parse_cookie_input(cookies)
+    token = got.get("auth_token", "")
+    if not token:
+        return RedirectResponse(
+            "/credentials?error=No+auth_token+found.+Paste+the+whole+Cookie+"
+            "header+from+DevTools+%E2%86%92+Network+%E2%86%92+Request+Headers.",
+            status_code=303,
+        )
+    save_overrides({"x_auth_token": token, "x_ct0": got.get("ct0", "")})
+    apply_overrides(settings)
+    return RedirectResponse("/credentials?saved=1", status_code=303)
+
+
 @app.post("/credentials/instagram")
 def credentials_instagram(sessionid: str = Form(""), csrftoken: str = Form("")):
     save_overrides({
         "instagram_sessionid": sessionid.strip(),
         "instagram_csrftoken": csrftoken.strip(),
+    })
+    apply_overrides(settings)
+    return RedirectResponse("/credentials?saved=1", status_code=303)
+
+
+@app.post("/credentials/instagram/paste")
+def credentials_instagram_paste(cookies: str = Form("")):
+    got = parse_cookie_input(cookies)
+    session = got.get("sessionid", "")
+    if not session:
+        return RedirectResponse(
+            "/credentials?error=No+sessionid+found.+Paste+the+whole+Cookie+"
+            "header+from+DevTools+%E2%86%92+Network+%E2%86%92+Request+Headers.",
+            status_code=303,
+        )
+    save_overrides({
+        "instagram_sessionid": session,
+        "instagram_csrftoken": got.get("csrftoken", ""),
     })
     apply_overrides(settings)
     return RedirectResponse("/credentials?saved=1", status_code=303)

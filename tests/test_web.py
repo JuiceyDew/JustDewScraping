@@ -72,6 +72,37 @@ def test_credentials_x_is_stored(client):
     assert stored["x_auth_token"] == "tok-123" and stored["x_ct0"] == "csrf-xyz"
 
 
+def test_x_paste_header_is_parsed(client):
+    """The one-paste path: the whole Cookie header, HttpOnly values included."""
+    from ideafindr.state import load_overrides
+
+    r = client.post("/credentials/x/paste",
+                    data={"cookies": "auth_token=tok-abc; ct0=csrf-def"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    stored = load_overrides()
+    assert stored["x_auth_token"] == "tok-abc" and stored["x_ct0"] == "csrf-def"
+
+
+def test_x_paste_without_token_reports_error(client):
+    r = client.post("/credentials/x/paste", data={"cookies": "ct0=only-csrf"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert "error=" in r.headers["location"]
+
+
+def test_instagram_paste_header_is_parsed(client):
+    from ideafindr.state import load_overrides
+
+    r = client.post("/credentials/instagram/paste",
+                    data={"cookies": "sessionid=ig-123; csrftoken=ig-csrf"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    stored = load_overrides()
+    assert stored["instagram_sessionid"] == "ig-123"
+    assert stored["instagram_csrftoken"] == "ig-csrf"
+
+
 def test_import_without_browser_reports_error_not_500(client, monkeypatch):
     """A failed cookie import must be a friendly redirect, never a crash."""
     monkeypatch.setattr(webapp.browsercookies, "read_cookies", lambda p: {})

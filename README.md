@@ -93,22 +93,25 @@ Settings/Credentials pages, or delete projects. **Restrict the firewall to your
 subnet, or put a VPN / authenticating reverse proxy in front of it.** The
 retriever bridge stays on `127.0.0.1`. It stores nothing in the repository.
 
-### The safe way: import from your browser
+### Getting cookies: one paste
 
-The UI runs on the same machine you log into, so the Credentials page can read
-that browser's cookie store directly. You log in normally; the platform never
-sees automation.
+Open the Credentials page and paste the browser's whole `Cookie` request header.
+That is the simplest path, and it works when you are browsing from another
+machine on the LAN — where "import from browser" (which reads the *server's*
+browser) cannot help.
 
-On Linux, **Firefox** cookies decrypt without an external keyring — it is the
-happy path. Chromium-family reads need the OS keyring, which a headless systemd
-service may not have unlocked, in which case paste manually.
+1. Log into the platform normally (x.com or instagram.com).
+2. DevTools (F12) → **Network** → reload → click any request → **Request
+   Headers** → copy the value of `Cookie`.
+3. Paste it into the field. The page pulls out `auth_token`/`ct0` (X) or
+   `sessionid`/`csrftoken` (Instagram) itself.
 
-### Manual paste
+The Network tab is the reliable source because `auth_token` and `sessionid` are
+**HttpOnly**: the Console's `document.cookie` deliberately omits them, so the
+old "Application → Cookies" hunt was the slow part. The paste box also accepts a
+`document.cookie` string, a JSON object, or a Netscape `cookies.txt` export.
 
-Every platform has exact steps on the Credentials page. In short: open DevTools
-(F12) → Application → Cookies → copy the values.
-
-| Platform | Cookies | Notes |
+| Platform | Cookie header contains | Notes |
 |---|---|---|
 | X / Twitter | `auth_token`, `ct0` | **Dedicated burner account.** No proxy: single account, low volume. |
 | Instagram | `sessionid`, `csrftoken` | Login-gated and rate-limits hard; expect low yield. |
@@ -118,6 +121,12 @@ Every platform has exact steps on the Credentials page. In short: open DevTools
 > account.** Scraping both is against their Terms of Service, which is a
 > commercial and legal exposure when you sell the report, not just a technical
 > risk.
+
+#### Fallback: import from this server's browser
+
+Only useful when the server and the browser are the same machine. On Linux,
+**Firefox** cookies decrypt without an external keyring; Chromium-family reads
+need the OS keyring, which a headless systemd service may not have unlocked.
 
 ### Reddit access
 
